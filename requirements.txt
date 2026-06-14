@@ -1,0 +1,28 @@
+# ==========================================================================
+# 运行 + 训练 所需的核心依赖（不含 TensorFlow 导出链路）
+# 服务端常驻监听只需要：numpy / onnxruntime / openwakeword / sounddevice / webrtcvad
+# 训练额外需要：torch / sherpa-onnx
+# ==========================================================================
+
+# --- 通用 ---
+numpy<2
+scipy
+soundfile
+pyyaml
+tqdm
+
+# --- 实时音频采集 + 轻量 VAD（功耗门控）---
+sounddevice
+webrtcvad-wheels          # Windows 上有预编译 wheel，免去 C 编译器
+
+# --- 推理运行时 + 唤醒词引擎 ---
+onnxruntime
+openwakeword
+
+# --- 训练：正样本中文 TTS 合成 ---
+sherpa-onnx
+
+# --- 训练：分类器 ---
+# 默认装的是 CPU 版 torch，足够训练这个小模型。
+# 想用 GPU 请按 https://pytorch.org 的指引单独安装对应 CUDA 版本。
+torch

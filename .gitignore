@@ -1,0 +1,36 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 训练产物 / 下载的大文件（不入库，用 Release 发布成品模型）----
+artifacts/
+*.tar.bz2
+vits-zh-aishell3/
+*.npy
+*.wav
+
+# ---- 训练好的模型（如需共享，建议走 Git LFS 或 Release）----
+*.pth
+*.onnx
+*.tflite
+tf_model/
+models/*.onnx
+!models/.gitkeep
+
+# ---- IDE / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

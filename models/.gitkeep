@@ -1,0 +1,2 @@
+# 占位文件：训练得到的成品模型（xiaoyuan.onnx）会放在这里。
+# 模型本身被 .gitignore 排除，建议用 GitHub Release 或 Git LFS 分发。

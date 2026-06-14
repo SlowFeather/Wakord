@@ -1,0 +1,12 @@
+# ==========================================================================
+# 可选：仅当你需要把 ONNX 进一步转成 TensorFlow / TFLite 时才安装。
+# 常驻监听服务不需要这些；用 ONNX 模型即可。
+#   pip install -r requirements-export.txt
+# ==========================================================================
+onnx==1.15.0
+onnxsim
+onnx2tf
+onnx-graphsurgeon
+sng4onnx
+tf-keras
+tensorflow

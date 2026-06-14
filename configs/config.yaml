@@ -1,0 +1,42 @@
+# ==========================================================================
+# 全局配置。所有字段都有内置默认值（见 src/wakeup/config.py）。
+# 这里只需写你想覆盖的项即可。命令行用 --config 指定本文件。
+# ==========================================================================
+
+paths:
+  base_dir: artifacts          # 所有训练产物/下载文件的根目录
+  model_path: models/xiaoyuan.onnx   # 训练完成后部署用的成品模型路径
+
+data:
+  target_word: "小元"
+  num_samples: 1000            # TTS 合成的正样本数量（越多泛化越好，越慢）
+  clip_seconds: 3              # 单条样本长度（秒），3 秒可凑足 >=16 帧特征
+  speaker_id_min: 0            # vits-zh-aishell3 说话人 id 范围 0~173
+  speaker_id_max: 173
+  speed_min: 0.8               # 随机语速下限
+  speed_max: 1.4               # 随机语速上限
+
+train:
+  target_frames: 16
+  embedding_dim: 96
+  neg_pos_ratio: 20            # 负:正 样本比
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  val_split: 0.2
+  seed: 42
+
+service:
+  host: "127.0.0.1"            # 控制接口监听地址（仅本机）
+  port: 8765                   # 控制接口端口
+  model_name: "xiaoyuan"       # 唤醒词模型名（事件回传里会带上）
+  threshold: 0.5               # 触发阈值，先用 listen 命令调参再改这里
+  cooldown_seconds: 2.0        # 一次触发后多少秒内不重复触发
+  start_listening: false       # 服务启动后是否立刻开始监听
+
+  # ---- 功耗门控：只有检测到人声才跑唤醒词模型 ----
+  vad_backend: "auto"          # auto | webrtc | energy | none
+  vad_aggressiveness: 2        # webrtc 模式 0~3，越大越严格（越不容易误判为人声）
+  energy_threshold: 0.012      # energy 模式的归一化能量阈值
+  hangover_frames: 8           # 人声结束后再多跑几帧（~0.64s），防止把尾音切掉
+  preroll_frames: 16           # 人声开始时回灌的前导帧数（~1.28s），给模型上下文

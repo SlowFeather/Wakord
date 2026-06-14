@@ -1,0 +1,14 @@
+# Conda 环境定义。创建：
+#   conda env create -f environment.yml
+#   conda activate wakeup
+#
+# 之后以可编辑方式安装本项目（让 `wakeup` 命令可用）：
+#   pip install -e .
+name: wakeup
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r requirements.txt
