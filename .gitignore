@@ -29,6 +29,9 @@ tf_model/
 models/*.onnx
 !models/.gitkeep
 
+# ---- 日志 / 临时 ----
+*.log
+
 # ---- IDE / 系统 ----
 .vscode/
 .idea/

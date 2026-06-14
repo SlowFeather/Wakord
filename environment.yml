@@ -1,9 +1,14 @@
-# Conda 环境定义。创建：
+# Conda environment definition.
+#
+# Create:
 #   conda env create -f environment.yml
 #   conda activate wakeup
 #
-# 之后以可编辑方式安装本项目（让 `wakeup` 命令可用）：
+# Then install this project in editable mode (enables the `wakeup` command):
 #   pip install -e .
+#
+# Note: keep this file ASCII-only. Very old conda builds read it with the
+# system code page (e.g. GBK on zh-CN Windows) and crash on non-ASCII bytes.
 name: wakeup
 channels:
   - conda-forge
