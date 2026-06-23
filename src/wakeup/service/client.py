@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from typing import Callable, Iterator
 
 from .._logging import get_logger
@@ -24,12 +25,15 @@ class ServiceClient:
         self._sock: socket.socket | None = None
         self._rfile = None
         self._wfile = None
+        self.initial_status: dict | None = None
 
     def connect(self) -> "ServiceClient":
         self._sock = socket.create_connection((self.host, self.port), self.timeout)
-        self._sock.settimeout(None)
+        self._sock.settimeout(self.timeout)
         self._rfile = self._sock.makefile("rb")
         self._wfile = self._sock.makefile("wb")
+        self.initial_status = self.recv()
+        self._sock.settimeout(None)
         return self
 
     def close(self) -> None:
@@ -51,10 +55,14 @@ class ServiceClient:
 
     # ---- 收发 ----
     def send(self, message: dict) -> None:
+        if self._wfile is None:
+            raise ConnectionError("service client is not connected")
         self._wfile.write(p.encode(message))
         self._wfile.flush()
 
     def recv(self) -> dict | None:
+        if self._rfile is None:
+            raise ConnectionError("service client is not connected")
         line = self._rfile.readline()
         if not line:
             return None
@@ -70,8 +78,36 @@ class ServiceClient:
 
     # ---- 便捷命令（发完读一条响应）----
     def command(self, cmd: str) -> dict | None:
+        if self._sock is None:
+            raise ConnectionError("service client is not connected")
         self.send({"cmd": cmd})
-        return self.recv()
+        deadline = time.monotonic() + self.timeout
+        old_timeout = self._sock.gettimeout()
+        self._sock.settimeout(self.timeout)
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"timed out waiting for response to {cmd!r}")
+                self._sock.settimeout(remaining)
+                msg = self.recv()
+                if msg is None:
+                    raise ConnectionError("service closed the connection")
+
+                typ = msg.get("type")
+                if typ == p.TYPE_ERROR:
+                    return msg
+                if cmd == p.CMD_STATUS and typ == p.TYPE_STATUS:
+                    return msg
+                if typ == p.TYPE_ACK and msg.get("cmd") == cmd:
+                    return msg
+                if cmd == p.CMD_PING and typ == p.TYPE_PONG:
+                    return msg
+                logger.debug("忽略命令响应前的推送消息: %s", msg)
+        except socket.timeout as exc:
+            raise TimeoutError(f"timed out waiting for response to {cmd!r}") from exc
+        finally:
+            self._sock.settimeout(old_timeout)
 
     def start(self) -> dict | None:
         return self.command(p.CMD_START)

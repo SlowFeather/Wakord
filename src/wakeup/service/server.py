@@ -51,6 +51,8 @@ class WakeWordService:
         self._detector: WakeWordDetector | None = None
         self._worker: threading.Thread | None = None
         self._server: socketserver.ThreadingTCPServer | None = None
+        self._ready = threading.Event()
+        self._error: str | None = None
 
         if cfg.service.start_listening:
             self._listen_flag.set()
@@ -76,14 +78,22 @@ class WakeWordService:
             "listening": self._listen_flag.is_set(),
             "model": self.cfg.service.model_name,
             "threshold": self.cfg.service.threshold,
+            "ready": self._ready.is_set(),
+            "worker_alive": self._worker.is_alive() if self._worker is not None else False,
+            "error": self._error,
         }
 
     # ---------------- 控制命令 ----------------
-    def start_listening(self) -> None:
+    def start_listening(self) -> dict | None:
+        if not self._ready.is_set():
+            message = self._error or "wake word detector is not ready"
+            logger.warning("无法开始监听: %s", message)
+            return {"type": p.TYPE_ERROR, "message": message}
         if not self._listen_flag.is_set():
             self._listen_flag.set()
             logger.info("开始监听")
         self.broadcast(self.status())
+        return None
 
     def stop_listening(self) -> None:
         if self._listen_flag.is_set():
@@ -103,9 +113,14 @@ class WakeWordService:
         # 模型加载较慢，放到线程里做，避免阻塞服务启动
         try:
             self._detector = WakeWordDetector(self.cfg)
+            self._error = None
+            self._ready.set()
+            self.broadcast(self.status())
         except Exception as exc:
+            self._ready.clear()
+            self._error = f"模型加载失败: {exc}"
             logger.error("唤醒词模型加载失败: %s", exc)
-            self.broadcast({"type": p.TYPE_ERROR, "message": f"模型加载失败: {exc}"})
+            self.broadcast({"type": p.TYPE_ERROR, "message": self._error})
             return
 
         while not self._shutdown_flag.is_set():
@@ -173,8 +188,11 @@ class WakeWordService:
                     return
 
                 if cmd == p.CMD_START:
-                    service.start_listening()
-                    conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+                    error = service.start_listening()
+                    if error is not None:
+                        conn.send(error)
+                    else:
+                        conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
                 elif cmd == p.CMD_STOP:
                     service.stop_listening()
                     conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})

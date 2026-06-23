@@ -7,7 +7,7 @@ name = "wakeup"
 version = "0.1.0"
 description = "本地中文语音唤醒词训练与常驻监听服务（唤醒词：小元）"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "WakeUp Project" }]
 dependencies = [
@@ -22,12 +22,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 训练用：合成中文正样本 + 训练分类器
-train = ["torch", "sherpa-onnx"]
-# 实时麦克风 VAD 门控（功耗优化）
+runtime = ["numpy<2", "scipy", "soundfile", "pyyaml", "tqdm", "sounddevice", "onnxruntime", "openwakeword"]
+train = ["torch", "sherpa-onnx", "onnxscript"]
 vad = ["webrtcvad-wheels"]
-# ONNX -> TF/TFLite 导出
-export = ["onnx==1.15.0", "onnxsim", "onnx2tf", "onnx-graphsurgeon", "sng4onnx", "tf-keras", "tensorflow"]
+edge = ["edge-tts"]
+export = ["onnx>=1.16", "onnxsim", "onnx2tf", "onnx-graphsurgeon", "sng4onnx", "tf-keras", "tensorflow"]
+dev = ["pytest"]
+all = [
+    "torch",
+    "sherpa-onnx",
+    "onnxscript",
+    "webrtcvad-wheels",
+    "edge-tts",
+    "pytest",
+]
 
 [project.scripts]
 wakeup = "wakeup.cli:main"

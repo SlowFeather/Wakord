@@ -36,8 +36,13 @@ def export_onnx(cfg: Config, model: WakeWordModel, *, simplify: bool = True) -> 
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
-        opset_version=17,
+        opset_version=18,
+        verbose=False,  # torch2.x dynamo 导出器默认会 print 含 emoji 的进度，GBK 控制台会崩
     )
+
+    # torch>=2.x 的 dynamo 导出器可能把权重存成外部 .data 旁文件，单拷 .onnx 会丢权重，
+    # 导致部署模型加载失败。这里统一内联成单个自包含文件。
+    _inline_external_data(onnx_path)
 
     if simplify:
         _try_simplify(onnx_path)
@@ -48,6 +53,32 @@ def export_onnx(cfg: Config, model: WakeWordModel, *, simplify: bool = True) -> 
     shutil.copyfile(onnx_path, deploy)
     logger.info("成品模型已就绪: %s", deploy)
     return deploy
+
+
+def export_from_checkpoint(cfg: Config, *, simplify: bool = True) -> Path:
+    """从已训练的 ``best.pth`` 重新导出 ONNX，无需重新训练。"""
+    fs = cfg.fs
+    if not fs.best_ckpt.exists():
+        raise FileNotFoundError(
+            f"找不到训练权重: {fs.best_ckpt}\n请先运行 `wakeup train`。"
+        )
+    tf = cfg.train
+    model = WakeWordModel(tf.target_frames, tf.embedding_dim)
+    model.load_state_dict(torch.load(fs.best_ckpt, map_location="cpu"))
+    logger.info("从权重重新导出: %s", fs.best_ckpt)
+    return export_onnx(cfg, model, simplify=simplify)
+
+
+def _inline_external_data(onnx_path: Path) -> None:
+    """把外部权重(.data)内联进单个 ONNX 文件，并清理旁文件。"""
+    import onnx
+
+    model = onnx.load(str(onnx_path))  # 默认会从同目录加载外部权重
+    onnx.save_model(model, str(onnx_path), save_as_external_data=False)
+    sidecar = onnx_path.with_name(onnx_path.name + ".data")
+    if sidecar.exists():
+        sidecar.unlink()
+        logger.debug("已清理外部权重旁文件: %s", sidecar)
 
 
 def _try_simplify(onnx_path: Path) -> None:

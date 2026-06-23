@@ -3,7 +3,7 @@
 # 常驻监听服务不需要这些；用 ONNX 模型即可。
 #   pip install -r requirements-export.txt
 # ==========================================================================
-onnx==1.15.0
+onnx>=1.16          # 与 onnxscript 兼容；旧的 ==1.15.0 会和核心依赖冲突
 onnxsim
 onnx2tf
 onnx-graphsurgeon

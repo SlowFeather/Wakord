@@ -15,11 +15,17 @@ data:
   speaker_id_max: 173
   speed_min: 0.8               # 随机语速下限
   speed_max: 1.4               # 随机语速上限
+  # 音频层增强：给 TTS 正样本叠加噪声/混响/增益/麦克风频响，缩小与真人/真麦的域差距。
+  # 这是纯 TTS 也能尽量识别真实嗓音的关键；改完需 `wakeup prepare --force-features` 重建特征。
+  audio_augment: true
+  audio_augment_variants: 2    # 每条 TTS 样本额外生成的增强变体数（0=关；越大越慢越多样）
 
 train:
   target_frames: 16
   embedding_dim: 96
-  neg_pos_ratio: 20            # 负:正 样本比
+  neg_pos_ratio: 8             # 负:正 样本比
+  positive_target: 4000        # 正样本增强后的数量（词放随机位置+真实背景填充）
+  augment_noise: 0.0           # 增强样本叠加的高斯噪声标准差（0=关）
   epochs: 50
   batch_size: 64
   learning_rate: 0.001
@@ -35,8 +41,12 @@ service:
   start_listening: false       # 服务启动后是否立刻开始监听
 
   # ---- 功耗门控：只有检测到人声才跑唤醒词模型 ----
-  vad_backend: "auto"          # auto | webrtc | energy | none
+  vad_backend: "auto"          # auto(silero→webrtc→energy) | silero | webrtc | energy | none
   vad_aggressiveness: 2        # webrtc 模式 0~3，越大越严格（越不容易误判为人声）
-  energy_threshold: 0.012      # energy 模式的归一化能量阈值
-  hangover_frames: 8           # 人声结束后再多跑几帧（~0.64s），防止把尾音切掉
-  preroll_frames: 16           # 人声开始时回灌的前导帧数（~1.28s），给模型上下文
+  vad_silero_threshold: 0.5    # silero 人声概率阈值 0~1（偏低更灵敏、偏高更保守）
+  energy_threshold: 0.012      # energy 模式的基准阈值（实际取与本底噪声×3 的较大者）
+  hangover_frames: 8           # 已废弃：现不做 VAD 触发门控（保留仅为兼容旧配置）
+  preroll_frames: 16           # 已废弃：现持续推理保持缓冲预热，无需前导回灌（保留仅为兼容旧配置）
+
+  # 说明：监听时唤醒模型每帧都跑（openWakeWord 需连续音频，跳帧会漏检），按模型分+阈值+冷却触发。
+  # vad_backend 现仅影响 `wakeup listen --debug` 的诊断显示。真正省电靠 stop 时释放麦克风。

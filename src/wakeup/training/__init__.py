@@ -14,6 +14,8 @@ __all__ = [
     "train_classifier",
     "export_onnx",
     "export_tensorflow",
+    "prepare_data",
+    "fit",
     "run_training",
 ]
 
@@ -22,6 +24,8 @@ _LAZY = {
     "train_classifier": ("trainer", "train_classifier"),
     "export_onnx": ("export", "export_onnx"),
     "export_tensorflow": ("export", "export_tensorflow"),
+    "prepare_data": ("pipeline", "prepare_data"),
+    "fit": ("pipeline", "fit"),
     "run_training": ("pipeline", "run_training"),
 }
 

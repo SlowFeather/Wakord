@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import tarfile
+from pathlib import Path
 
 import soundfile as sf
 from tqdm import tqdm
@@ -17,6 +18,16 @@ from ..config import Config
 from ._download import download
 
 logger = get_logger(__name__)
+
+
+def safe_extract_tar(tar: tarfile.TarFile, target_dir: Path) -> None:
+    """Extract a tar archive only if every member stays inside target_dir."""
+    target = Path(target_dir).resolve()
+    for member in tar.getmembers():
+        member_path = (target / member.name).resolve()
+        if member_path != target and target not in member_path.parents:
+            raise RuntimeError(f"Refusing to extract unsafe tar member {member.name!r}")
+    tar.extractall(target)
 
 
 def _ensure_tts_model(cfg: Config):
@@ -29,7 +40,7 @@ def _ensure_tts_model(cfg: Config):
         archive = download(cfg.data.tts_model_url, fs.tts_archive, desc="TTS 模型")
         logger.info("解压 TTS 模型...")
         with tarfile.open(archive, "r:bz2") as tar:
-            tar.extractall(tts_dir.parent)
+            safe_extract_tar(tar, tts_dir.parent)
 
     lexicon = tts_dir / "lexicon.txt"
     tokens = tts_dir / "tokens.txt"

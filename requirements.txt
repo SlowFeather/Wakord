@@ -1,28 +1,27 @@
-# ==========================================================================
-# 运行 + 训练 所需的核心依赖（不含 TensorFlow 导出链路）
-# 服务端常驻监听只需要：numpy / onnxruntime / openwakeword / sounddevice / webrtcvad
-# 训练额外需要：torch / sherpa-onnx
-# ==========================================================================
+# Core runtime + training dependencies.
+# Keep this file ASCII-only for older conda builds on zh-CN Windows.
 
-# --- 通用 ---
+# Common
 numpy<2
 scipy
 soundfile
 pyyaml
 tqdm
 
-# --- 实时音频采集 + 轻量 VAD（功耗门控）---
+# Audio capture + light VAD
 sounddevice
-webrtcvad-wheels          # Windows 上有预编译 wheel，免去 C 编译器
+webrtcvad-wheels
 
-# --- 推理运行时 + 唤醒词引擎 ---
+# Inference runtime + wake-word engine
 onnxruntime
 openwakeword
 
-# --- 训练：正样本中文 TTS 合成 ---
-sherpa-onnx
+# ONNX export support for recent torch versions
+onnxscript
 
-# --- 训练：分类器 ---
-# 默认装的是 CPU 版 torch，足够训练这个小模型。
-# 想用 GPU 请按 https://pytorch.org 的指引单独安装对应 CUDA 版本。
+# Training: Chinese TTS generation + classifier
+sherpa-onnx
 torch
+
+# Optional Edge TTS voice expansion used by `wakeup gen-voices`
+edge-tts
