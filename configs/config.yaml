@@ -36,6 +36,8 @@ service:
   host: "127.0.0.1"            # 控制接口监听地址（仅本机）
   port: 8765                   # 控制接口端口
   model_name: "xiaoyuan"       # 唤醒词模型名（事件回传里会带上）
+  audio_device: null           # 音频输入设备 ID 或名称；null=使用系统默认输入设备
+  audio_queue_size: 50         # 音频帧队列长度；过小时易丢帧，过大可能增加延迟
   threshold: 0.5               # 触发阈值，先用 listen 命令调参再改这里
   cooldown_seconds: 2.0        # 一次触发后多少秒内不重复触发
   start_listening: false       # 服务启动后是否立刻开始监听

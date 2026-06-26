@@ -91,6 +91,14 @@ def test_config_validation_rejects_bad_threshold(tmp_path):
         load_config(cfg_path)
 
 
+def test_config_validation_rejects_bad_audio_queue_size(tmp_path):
+    cfg_path = tmp_path / "bad.yaml"
+    cfg_path.write_text("service:\n  audio_queue_size: 0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_config(cfg_path)
+
+
 def test_metrics_do_not_reward_all_negative_classifier():
     from wakeup.training.trainer import classification_metrics
 
@@ -165,6 +173,39 @@ def test_service_client_skips_greeting_and_broadcast():
         server.server_close()
 
 
+def test_service_client_command_skips_mixed_push_messages():
+    import socketserver
+    import threading
+
+    from wakeup.service import protocol as p
+    from wakeup.service.client import ServiceClient
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.wfile.write(p.encode({"type": "status", "listening": False}))
+            self.wfile.flush()
+            raw = self.rfile.readline()
+            cmd = p.decode(raw)["cmd"]
+            self.wfile.write(p.encode({"type": "wake", "model": "xiaoyuan", "score": 0.9}))
+            self.wfile.write(p.encode({"type": "status", "listening": True}))
+            self.wfile.write(p.encode({"type": "ack", "cmd": cmd, "ok": True}))
+            self.wfile.flush()
+
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        with ServiceClient(host, port, timeout=2.0) as client:
+            assert client.command("start") == {"type": "ack", "cmd": "start", "ok": True}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_service_start_returns_error_when_not_ready():
     from wakeup.service.server import WakeWordService
 
@@ -175,6 +216,9 @@ def test_service_start_returns_error_when_not_ready():
     assert resp["type"] == "error"
     assert status["ready"] is False
     assert status["worker_alive"] is False
+    assert "uptime_seconds" in status
+    assert status["worker_state"] in {"starting", "failed"}
+    assert status["audio_restart_count"] == 0
 
 
 def test_eval_audio_dirs_with_fake_detector(tmp_path, monkeypatch):
@@ -300,6 +344,129 @@ def test_service_broadcasts_wake_with_fake_audio_and_detector(tmp_path, monkeypa
     thread.join(timeout=3.0)
 
 
+def test_service_retries_audio_after_start_failure(tmp_path, monkeypatch):
+    import socket
+    import threading
+    import time
+
+    from wakeup.service import protocol as p
+    from wakeup.service.detector import DetectionEvent
+    from wakeup.service.server import WakeWordService
+
+    cfg = load_config()
+    cfg.paths.base_dir = str(tmp_path / "artifacts")
+    cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
+    cfg.service.port = 0
+    cfg.service.start_listening = True
+
+    class FakeDetector:
+        def __init__(self, _cfg):
+            self.last_active_score = 0.0
+            self.sent = False
+
+        def reset(self):
+            self.sent = False
+
+        def process(self, _frame):
+            self.last_active_score = 0.93
+            if not self.sent:
+                self.sent = True
+                return DetectionEvent("xiaoyuan", 0.93, time.time())
+            return None
+
+    class FlakyAudio:
+        starts = 0
+
+        def __init__(self, _cfg):
+            self.n = 0
+
+        def __enter__(self):
+            type(self).starts += 1
+            if type(self).starts == 1:
+                raise RuntimeError("device busy")
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self, timeout=0.5):
+            self.n += 1
+            time.sleep(0.01)
+            return np.zeros(1280, dtype=np.int16)
+
+    monkeypatch.setattr("wakeup.service.server.WakeWordDetector", FakeDetector)
+    monkeypatch.setattr("wakeup.service.server.AudioInput", FlakyAudio)
+
+    service = WakeWordService(cfg)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 3.0
+    while service._server is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service._server is not None
+    host, port = service._server.server_address
+
+    try:
+        with socket.create_connection((host, port), timeout=2.0) as sock:
+            rfile = sock.makefile("rb")
+            assert p.decode(rfile.readline())["type"] == "status"
+            msg = None
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                line = rfile.readline()
+                if not line:
+                    break
+                msg = p.decode(line)
+                if msg.get("type") == "wake":
+                    break
+            assert msg["type"] == "wake"
+            assert service.status()["audio_restart_count"] >= 1
+            assert service.status()["worker_alive"] is True
+    finally:
+        service.shutdown()
+        thread.join(timeout=3.0)
+
+
+def test_service_shutdown_stops_worker_thread(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from wakeup.service.server import WakeWordService
+
+    cfg = load_config()
+    cfg.paths.base_dir = str(tmp_path / "artifacts")
+    cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
+    cfg.service.port = 0
+    cfg.service.start_listening = False
+
+    class FakeDetector:
+        def __init__(self, _cfg):
+            self.last_active_score = 0.0
+
+        def reset(self):
+            return None
+
+        def process(self, _frame):
+            return None
+
+    monkeypatch.setattr("wakeup.service.server.WakeWordDetector", FakeDetector)
+
+    service = WakeWordService(cfg)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 3.0
+    while service._server is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service._server is not None
+    assert service._ready.wait(timeout=3.0)
+    service.shutdown()
+    thread.join(timeout=3.0)
+
+    assert not thread.is_alive()
+    assert service._worker is not None
+    assert not service._worker.is_alive()
+
+
 def test_daemon_status_reports_pid_files(tmp_path):
     from wakeup.service.daemon import status_daemon
 
@@ -310,3 +477,55 @@ def test_daemon_status_reports_pid_files(tmp_path):
     assert status["process_alive"] is False
     assert status["service_responding"] is False
     assert status["pid_file"].endswith("wakeup.pid")
+    assert status["meta_file"].endswith("wakeup-daemon.json")
+
+
+def test_daemon_status_reports_stale_pid_file(tmp_path):
+    from wakeup.service.daemon import daemon_paths, status_daemon
+
+    cfg = load_config()
+    cfg.paths.base_dir = str(tmp_path / "artifacts")
+    paths = daemon_paths(cfg)
+    paths.run_dir.mkdir(parents=True)
+    paths.pid_file.write_text("999999", encoding="utf-8")
+
+    status = status_daemon(cfg)
+
+    assert status["pid_alive"] is False
+    assert status["stale_pid_file"] is True
+
+
+def test_cli_device_override_reaches_audio_config(monkeypatch):
+    from wakeup import cli
+
+    seen = {}
+
+    class FakeDetector:
+        def __init__(self, cfg):
+            seen["detector_device"] = cfg.service.audio_device
+            self.last_active_score = 0.0
+
+        def reset(self):
+            return None
+
+        def process(self, _frame):
+            raise KeyboardInterrupt
+
+    class FakeAudio:
+        def __init__(self, cfg):
+            seen["audio_device"] = cfg.service.audio_device
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self, timeout=0.5):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("wakeup.service.detector.WakeWordDetector", FakeDetector)
+    monkeypatch.setattr("wakeup.service.audio.AudioInput", FakeAudio)
+
+    assert cli.main(["listen", "--device", "Mic 1"]) == 0
+    assert seen == {"detector_device": "Mic 1", "audio_device": "Mic 1"}

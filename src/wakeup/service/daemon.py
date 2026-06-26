@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -65,13 +66,27 @@ def _service_responds(cfg: Config, timeout: float = 0.5) -> bool:
 def status_daemon(cfg: Config) -> dict:
     paths = daemon_paths(cfg)
     pid = _read_pid(paths.pid_file)
+    pid_file_exists = paths.pid_file.exists()
+    process_alive = _pid_alive(pid)
+    service_responding = _service_responds(cfg)
     return {
         "pid": pid,
-        "process_alive": _pid_alive(pid),
-        "service_responding": _service_responds(cfg),
+        "pid_alive": process_alive,
+        "process_alive": process_alive,
+        "service_responding": service_responding,
+        "stale_pid_file": pid_file_exists and not process_alive and not service_responding,
         "pid_file": str(paths.pid_file),
         "log_file": str(paths.log_file),
+        "meta_file": str(paths.meta_file),
     }
+
+
+def _remove_stale_daemon_files(paths: DaemonPaths) -> None:
+    for path in (paths.pid_file, paths.meta_file):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def start_daemon(
@@ -86,10 +101,16 @@ def start_daemon(
     paths.run_dir.mkdir(parents=True, exist_ok=True)
 
     current = status_daemon(cfg)
-    if current["process_alive"] or current["service_responding"]:
+    if current["service_responding"]:
         current["started"] = False
         current["message"] = "daemon already appears to be running"
         return current
+    if current["pid_alive"]:
+        current["started"] = False
+        current["message"] = "daemon process exists but service is not responding"
+        return current
+    if current["stale_pid_file"]:
+        _remove_stale_daemon_files(paths)
 
     cmd = [sys.executable, "-m", "wakeup.cli", "serve"]
     if config_path:
@@ -206,8 +227,12 @@ def install_autostart(cfg: Config, *, config_path: str | None = None, listen: bo
 
     if os.name == "nt":
         task_name = "WakeUpVoiceService"
-        ps_cmd = " ".join([f'"{c}"' if " " in c else c for c in cmd])
-        action = f"cmd /c cd /d {Path.cwd()} && {ps_cmd} >> {paths.log_file} 2>&1"
+        cwd = str(Path.cwd())
+        quoted_cmd = " ".join([subprocess.list2cmdline([part]) for part in cmd])
+        action = (
+            f'cmd /c cd /d "{cwd}" && {quoted_cmd} '
+            f'>> "{paths.log_file}" 2>&1'
+        )
         subprocess.run(
             [
                 "schtasks",
@@ -235,7 +260,7 @@ def install_autostart(cfg: Config, *, config_path: str | None = None, listen: bo
                 "",
                 "[Service]",
                 f"WorkingDirectory={Path.cwd()}",
-                "ExecStart=" + " ".join(cmd),
+                "ExecStart=" + " ".join(shlex.quote(c) for c in cmd),
                 "Restart=on-failure",
                 "RestartSec=3",
                 "",

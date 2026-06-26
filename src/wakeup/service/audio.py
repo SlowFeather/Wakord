@@ -20,26 +20,41 @@ class AudioInput:
     def __init__(self, cfg: Config, device: int | str | None = None):
         self.sample_rate = cfg.service.sample_rate
         self.frame_samples = cfg.service.frame_samples
-        self.device = device
-        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=50)
+        self.device = device if device is not None else cfg.service.audio_device
+        self._queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=cfg.service.audio_queue_size)
         self._stream = None
 
     def _callback(self, indata, frames, time_info, status):  # noqa: D401
         if status:
             logger.debug("音频流状态: %s", status)
+        frame = self._normalize_frame(indata)
         try:
-            self._queue.put_nowait(indata[:, 0].copy())
+            self._queue.put_nowait(frame)
         except queue.Full:
             # 处理跟不上时丢弃最旧帧，避免无限堆积造成延迟
             try:
                 self._queue.get_nowait()
-                self._queue.put_nowait(indata[:, 0].copy())
+                self._queue.put_nowait(frame)
             except queue.Empty:
                 pass
+
+    def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
+        arr = np.asarray(frame)
+        if arr.ndim > 1:
+            arr = arr[:, 0]
+        arr = arr.astype(np.int16, copy=False)
+        if len(arr) == self.frame_samples:
+            return arr.copy()
+        if len(arr) > self.frame_samples:
+            return arr[: self.frame_samples].copy()
+        out = np.zeros(self.frame_samples, dtype=np.int16)
+        out[: len(arr)] = arr
+        return out
 
     def start(self) -> "AudioInput":
         import sounddevice as sd
 
+        self._clear_queue()
         self._stream = sd.InputStream(
             samplerate=self.sample_rate,
             blocksize=self.frame_samples,
@@ -55,7 +70,7 @@ class AudioInput:
     def read(self, timeout: float = 0.5) -> Optional[np.ndarray]:
         """取一帧 int16 音频；超时返回 None。"""
         try:
-            return self._queue.get(timeout=timeout)
+            return self._normalize_frame(self._queue.get(timeout=timeout))
         except queue.Empty:
             return None
 
@@ -65,6 +80,13 @@ class AudioInput:
             self._stream.close()
             self._stream = None
             logger.info("麦克风已关闭")
+
+    def _clear_queue(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
 
     def __enter__(self) -> "AudioInput":
         return self.start()

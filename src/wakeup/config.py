@@ -82,6 +82,8 @@ class ServiceConfig:
     model_name: str = "xiaoyuan"
     sample_rate: int = 16000
     frame_samples: int = 1280  # openWakeWord 单帧 80ms @ 16k
+    audio_device: int | str | None = None
+    audio_queue_size: int = 50
     threshold: float = 0.5
     cooldown_seconds: float = 2.0
     start_listening: bool = False
@@ -262,6 +264,7 @@ def validate_config(cfg: Config) -> None:
         raise ValueError(f"service.port must be 1..65535, got {cfg.service.port}")
     _require_positive("service.sample_rate", cfg.service.sample_rate)
     _require_positive("service.frame_samples", cfg.service.frame_samples)
+    _require_positive("service.audio_queue_size", cfg.service.audio_queue_size)
     _require_range("service.threshold", cfg.service.threshold, 0.0, 1.0)
     _require_positive("service.cooldown_seconds", cfg.service.cooldown_seconds)
     if cfg.service.vad_backend not in {"auto", "silero", "webrtc", "energy", "none"}:

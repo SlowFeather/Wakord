@@ -30,6 +30,10 @@ def _add_client_opts(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--port", type=int, default=None, help="覆盖服务端口")
 
 
+def _add_audio_device_opt(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument("--device", default=None, help="覆盖音频输入设备 ID 或名称")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="wakeup", description="本地中文语音唤醒（小元）")
     parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR")
@@ -77,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("serve", help="启动常驻监听服务")
     _add_common(sp)
     _add_client_opts(sp)
+    _add_audio_device_opt(sp)
     sp.add_argument("--listen", action="store_true", help="启动后立即开始监听")
 
     # ctl
@@ -93,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     # listen（前台直跑，调参用）
     sp = sub.add_parser("listen", help="前台直接监听（不起服务），调阈值用")
     _add_common(sp)
+    _add_audio_device_opt(sp)
     sp.add_argument("--show-score", action="store_true", help="实时打印预测分")
     sp.add_argument("--debug", action="store_true",
                     help="诊断模式：不门控、每帧都跑模型，连续打印 VAD/原始分/麦克风电平")
@@ -136,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--wait", type=float, default=10.0, help="start 等待服务就绪的秒数")
 
     # devices
-    sub.add_parser("devices", help="列出音频设备")
+    sp = sub.add_parser("devices", help="列出音频设备")
+    _add_common(sp)
+    _add_audio_device_opt(sp)
 
     # export（从已训练权重重新导出 ONNX，不重训）
     sp = sub.add_parser("export", help="从已训练权重(best.pth)重新导出 ONNX（不重训）")
@@ -155,6 +163,12 @@ def _client_cfg(cfg, args):
         cfg.service.host = args.host
     if getattr(args, "port", None):
         cfg.service.port = args.port
+    return cfg
+
+
+def _audio_cfg(cfg, args):
+    if getattr(args, "device", None) is not None:
+        cfg.service.audio_device = args.device
     return cfg
 
 
@@ -214,6 +228,7 @@ def cmd_serve(args) -> int:
 
     cfg = load_config(args.config)
     cfg = _client_cfg(cfg, args)
+    cfg = _audio_cfg(cfg, args)
     if args.listen:
         cfg.service.start_listening = True
     logger.info("启动服务，Ctrl+C 退出")
@@ -263,6 +278,7 @@ def cmd_listen(args) -> int:
     from .service.detector import WakeWordDetector
 
     cfg = load_config(args.config)
+    cfg = _audio_cfg(cfg, args)
     if args.threshold is not None:
         cfg.service.threshold = args.threshold
     if args.vad is not None:
@@ -407,9 +423,12 @@ def cmd_daemon(args) -> int:
     return 0
 
 
-def cmd_devices(_args) -> int:
+def cmd_devices(args) -> int:
     from .service.audio import list_devices
 
+    cfg = _audio_cfg(load_config(args.config), args)
+    if cfg.service.audio_device is not None:
+        print(f"当前覆盖输入设备: {cfg.service.audio_device}")
     print(list_devices())
     return 0
 

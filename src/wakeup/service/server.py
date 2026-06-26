@@ -43,6 +43,7 @@ class _ClientConn:
 class WakeWordService:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self._started_at = time.monotonic()
         self._clients: set[_ClientConn] = set()
         self._clients_lock = threading.Lock()
 
@@ -53,6 +54,10 @@ class WakeWordService:
         self._server: socketserver.ThreadingTCPServer | None = None
         self._ready = threading.Event()
         self._error: str | None = None
+        self._worker_state = "starting"
+        self._audio_restart_count = 0
+        self._last_score = 0.0
+        self._last_wake_ts: float | None = None
 
         if cfg.service.start_listening:
             self._listen_flag.set()
@@ -81,6 +86,12 @@ class WakeWordService:
             "ready": self._ready.is_set(),
             "worker_alive": self._worker.is_alive() if self._worker is not None else False,
             "error": self._error,
+            "uptime_seconds": round(time.monotonic() - self._started_at, 3),
+            "worker_state": self._worker_state,
+            "last_error": self._error,
+            "audio_restart_count": self._audio_restart_count,
+            "last_score": round(self._last_score, 4),
+            "last_wake_ts": self._last_wake_ts,
         }
 
     # ---------------- 控制命令 ----------------
@@ -114,30 +125,41 @@ class WakeWordService:
         try:
             self._detector = WakeWordDetector(self.cfg)
             self._error = None
+            self._worker_state = "idle"
             self._ready.set()
             self.broadcast(self.status())
         except Exception as exc:
             self._ready.clear()
+            self._worker_state = "failed"
             self._error = f"模型加载失败: {exc}"
             logger.error("唤醒词模型加载失败: %s", exc)
             self.broadcast({"type": p.TYPE_ERROR, "message": self._error})
             return
 
+        retry_seconds = 1.0
         while not self._shutdown_flag.is_set():
             # 未监听时阻塞等待 —— 不占麦克风、不耗算力
+            self._worker_state = "idle"
             self._listen_flag.wait()
             if self._shutdown_flag.is_set():
                 break
 
             try:
+                self._worker_state = "opening_audio"
                 with AudioInput(self.cfg) as audio:
+                    retry_seconds = 1.0
+                    self._error = None
                     self._detector.reset()
+                    self._worker_state = "listening"
+                    self.broadcast(self.status())
                     while self._listen_flag.is_set() and not self._shutdown_flag.is_set():
                         frame = audio.read(timeout=0.5)
                         if frame is None:
                             continue
                         event = self._detector.process(frame)
+                        self._last_score = float(getattr(self._detector, "last_active_score", self._last_score))
                         if event is not None:
+                            self._last_wake_ts = event.ts
                             self.broadcast({
                                 "type": p.TYPE_WAKE,
                                 "model": event.model,
@@ -145,11 +167,16 @@ class WakeWordService:
                                 "ts": event.ts,
                             })
             except Exception as exc:
-                logger.error("检测循环异常: %s", exc)
-                self.broadcast({"type": p.TYPE_ERROR, "message": str(exc)})
-                # 出错后避免疯狂重试
-                time.sleep(1.0)
+                self._audio_restart_count += 1
+                self._error = f"音频/检测循环异常: {exc}"
+                self._worker_state = "retrying_audio"
+                logger.warning("检测循环异常，将在 %.1fs 后重试: %s", retry_seconds, exc)
+                self.broadcast({"type": p.TYPE_ERROR, "message": self._error})
+                if self._shutdown_flag.wait(retry_seconds):
+                    break
+                retry_seconds = min(retry_seconds * 2.0, 10.0)
 
+        self._worker_state = "stopped"
         logger.info("检测线程退出")
 
     # ---------------- 启动 / 阻塞运行 ----------------
@@ -221,6 +248,10 @@ class WakeWordService:
             self._server.server_close()
             self._shutdown_flag.set()
             self._listen_flag.set()
+            with self._clients_lock:
+                self._clients.clear()
+            if self._worker is not None and self._worker.is_alive():
+                self._worker.join(timeout=3.0)
             logger.info("服务已停止")
 
 
