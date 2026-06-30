@@ -83,6 +83,23 @@ def test_invalid_val_split_is_rejected():
         split_indices(10, 0.0, np.random.default_rng(0))
 
 
+def test_prepare_data_import_does_not_require_torch(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    from wakeup.training.pipeline import prepare_data
+
+    assert callable(prepare_data)
+
+
 def test_config_validation_rejects_bad_threshold(tmp_path):
     cfg_path = tmp_path / "bad.yaml"
     cfg_path.write_text("service:\n  threshold: 1.5\n", encoding="utf-8")

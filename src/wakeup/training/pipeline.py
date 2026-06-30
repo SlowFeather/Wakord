@@ -20,9 +20,6 @@ from ..data.features import (
 )
 from ..data.negatives import download_negative_features
 from ..data.tts_generator import generate_positive_samples
-from .dataset import build_dataset
-from .export import export_onnx, export_tensorflow
-from .trainer import train_classifier
 
 logger = get_logger(__name__)
 
@@ -76,6 +73,18 @@ def prepare_data(
 
 def fit(cfg: Config, *, export_tf: bool = False, simplify: bool = True) -> float:
     """阶段二（快）：从缓存特征训练并导出 ONNX，返回推荐阈值下的验证 F1。"""
+    try:
+        from .dataset import build_dataset
+        from .export import export_onnx, export_tensorflow
+        from .trainer import train_classifier
+    except ModuleNotFoundError as exc:
+        if exc.name == "torch":
+            raise RuntimeError(
+                "缺少训练依赖 torch。请安装训练依赖后再运行 `wakeup fit` 或 `wakeup train`，"
+                "例如：`uv sync --extra train` 或 `uv sync --extra all`。"
+            ) from exc
+        raise
+
     fs = cfg.fs
     fs.ensure_dirs()
 
