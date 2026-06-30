@@ -79,6 +79,10 @@ class TrainConfig:
 class ServiceConfig:
     host: str = "127.0.0.1"
     port: int = 8765
+    tcp_enabled: bool = True
+    ws_enabled: bool = True
+    ws_port: int = 8766
+    ws_path: str = "/v1/wake/ws"
     model_name: str = "xiaoyuan"
     sample_rate: int = 16000
     frame_samples: int = 1280  # openWakeWord 单帧 80ms @ 16k
@@ -262,6 +266,12 @@ def validate_config(cfg: Config) -> None:
 
     if not 1 <= cfg.service.port <= 65535:
         raise ValueError(f"service.port must be 1..65535, got {cfg.service.port}")
+    if not 1 <= cfg.service.ws_port <= 65535:
+        raise ValueError(f"service.ws_port must be 1..65535, got {cfg.service.ws_port}")
+    if cfg.service.tcp_enabled and cfg.service.ws_enabled and cfg.service.port == cfg.service.ws_port:
+        raise ValueError("service.port and service.ws_port must be different when both TCP and WS are enabled")
+    if not cfg.service.ws_path.startswith("/"):
+        raise ValueError("service.ws_path must start with /")
     _require_positive("service.sample_rate", cfg.service.sample_rate)
     _require_positive("service.frame_samples", cfg.service.frame_samples)
     _require_positive("service.audio_queue_size", cfg.service.audio_queue_size)

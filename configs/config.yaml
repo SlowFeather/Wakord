@@ -35,6 +35,10 @@ train:
 service:
   host: "127.0.0.1"            # 控制接口监听地址（仅本机）
   port: 8765                   # 控制接口端口
+  tcp_enabled: true             # 保留旧 TCP JSON-lines 控制接口
+  ws_enabled: true              # 启用 WebSocket 控制/事件接口
+  ws_port: 8766                 # WebSocket 端口
+  ws_path: "/v1/wake/ws"        # WebSocket 路径
   model_name: "xiaoyuan"       # 唤醒词模型名（事件回传里会带上）
   audio_device: null           # 音频输入设备 ID 或名称；null=使用系统默认输入设备
   audio_queue_size: 50         # 音频帧队列长度；过小时易丢帧，过大可能增加延迟

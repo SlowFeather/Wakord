@@ -1,18 +1,17 @@
-"""可被外部程序控制的常驻唤醒词服务。
-
-架构：
-* 一个 TCP 控制服务（ThreadingTCPServer），按 JSON-lines 协议收命令、回事件。
-* 一个后台检测线程：仅在「监听中」时打开麦克风并跑检测；
-  「停止监听」时**关闭麦克风**并阻塞等待，做到真正省电、随时可控。
-* 唤醒命中后向所有已连接客户端广播 ``wake`` 事件。
-"""
+"""Controllable wake-word service with TCP and WebSocket frontends."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import socket
 import socketserver
 import threading
 import time
+from typing import Any
+
+import websockets
+from websockets.exceptions import ConnectionClosed
 
 from .._logging import get_logger
 from ..config import Config
@@ -23,9 +22,7 @@ from .detector import WakeWordDetector
 logger = get_logger(__name__)
 
 
-class _ClientConn:
-    """封装一个客户端连接的写端，带锁避免多线程交错写。"""
-
+class _TcpClientConn:
     def __init__(self, wfile):
         self._wfile = wfile
         self._lock = threading.Lock()
@@ -44,14 +41,19 @@ class WakeWordService:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._started_at = time.monotonic()
-        self._clients: set[_ClientConn] = set()
-        self._clients_lock = threading.Lock()
+        self._tcp_clients: set[_TcpClientConn] = set()
+        self._tcp_clients_lock = threading.Lock()
+        self._ws_clients: set[Any] = set()
+        self._ws_clients_lock: asyncio.Lock | None = None
+        self._ws_loop: asyncio.AbstractEventLoop | None = None
+        self._ws_shutdown: asyncio.Event | None = None
 
-        self._listen_flag = threading.Event()       # 置位=监听中
-        self._shutdown_flag = threading.Event()     # 置位=进程退出
+        self._listen_flag = threading.Event()
+        self._shutdown_flag = threading.Event()
         self._detector: WakeWordDetector | None = None
         self._worker: threading.Thread | None = None
         self._server: socketserver.ThreadingTCPServer | None = None
+        self._ws_thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._error: str | None = None
         self._worker_state = "starting"
@@ -62,20 +64,20 @@ class WakeWordService:
         if cfg.service.start_listening:
             self._listen_flag.set()
 
-    # ---------------- 客户端管理 / 广播 ----------------
-    def add_client(self, conn: _ClientConn) -> None:
-        with self._clients_lock:
-            self._clients.add(conn)
+    def add_client(self, conn: _TcpClientConn) -> None:
+        with self._tcp_clients_lock:
+            self._tcp_clients.add(conn)
 
-    def remove_client(self, conn: _ClientConn) -> None:
-        with self._clients_lock:
-            self._clients.discard(conn)
+    def remove_client(self, conn: _TcpClientConn) -> None:
+        with self._tcp_clients_lock:
+            self._tcp_clients.discard(conn)
 
     def broadcast(self, message: dict) -> None:
-        with self._clients_lock:
-            dead = [c for c in self._clients if not c.send(message)]
-            for c in dead:
-                self._clients.discard(c)
+        with self._tcp_clients_lock:
+            dead = [client for client in self._tcp_clients if not client.send(message)]
+            for client in dead:
+                self._tcp_clients.discard(client)
+        self._schedule_ws_broadcast(message)
 
     def status(self) -> dict:
         return {
@@ -92,36 +94,37 @@ class WakeWordService:
             "audio_restart_count": self._audio_restart_count,
             "last_score": round(self._last_score, 4),
             "last_wake_ts": self._last_wake_ts,
+            "tcp_enabled": self.cfg.service.tcp_enabled,
+            "ws_enabled": self.cfg.service.ws_enabled,
+            "ws_path": self.cfg.service.ws_path,
         }
 
-    # ---------------- 控制命令 ----------------
     def start_listening(self) -> dict | None:
         if not self._ready.is_set():
             message = self._error or "wake word detector is not ready"
-            logger.warning("无法开始监听: %s", message)
+            logger.warning("cannot start listening: %s", message)
             return {"type": p.TYPE_ERROR, "message": message}
         if not self._listen_flag.is_set():
             self._listen_flag.set()
-            logger.info("开始监听")
+            logger.info("wake listening started")
         self.broadcast(self.status())
         return None
 
     def stop_listening(self) -> None:
         if self._listen_flag.is_set():
             self._listen_flag.clear()
-            logger.info("停止监听")
+            logger.info("wake listening stopped")
         self.broadcast(self.status())
 
     def shutdown(self) -> None:
-        logger.info("收到关闭指令")
+        logger.info("wake service shutdown requested")
         self._shutdown_flag.set()
-        self._listen_flag.set()  # 唤醒可能在阻塞等待的 worker
+        self._listen_flag.set()
         if self._server is not None:
             threading.Thread(target=self._server.shutdown, daemon=True).start()
+        self._request_ws_shutdown()
 
-    # ---------------- 后台检测线程 ----------------
     def _run_worker(self) -> None:
-        # 模型加载较慢，放到线程里做，避免阻塞服务启动
         try:
             self._detector = WakeWordDetector(self.cfg)
             self._error = None
@@ -131,14 +134,13 @@ class WakeWordService:
         except Exception as exc:
             self._ready.clear()
             self._worker_state = "failed"
-            self._error = f"模型加载失败: {exc}"
-            logger.error("唤醒词模型加载失败: %s", exc)
+            self._error = f"wake word detector failed to load: {exc}"
+            logger.error("wake word detector failed to load: %s", exc)
             self.broadcast({"type": p.TYPE_ERROR, "message": self._error})
             return
 
         retry_seconds = 1.0
         while not self._shutdown_flag.is_set():
-            # 未监听时阻塞等待 —— 不占麦克风、不耗算力
             self._worker_state = "idle"
             self._listen_flag.wait()
             if self._shutdown_flag.is_set():
@@ -160,40 +162,174 @@ class WakeWordService:
                         self._last_score = float(getattr(self._detector, "last_active_score", self._last_score))
                         if event is not None:
                             self._last_wake_ts = event.ts
-                            self.broadcast({
-                                "type": p.TYPE_WAKE,
-                                "model": event.model,
-                                "score": round(event.score, 4),
-                                "ts": event.ts,
-                            })
+                            self.broadcast(
+                                {
+                                    "type": p.TYPE_WAKE,
+                                    "model": event.model,
+                                    "score": round(event.score, 4),
+                                    "ts": event.ts,
+                                }
+                            )
             except Exception as exc:
                 self._audio_restart_count += 1
-                self._error = f"音频/检测循环异常: {exc}"
+                self._error = f"audio/detection loop failed: {exc}"
                 self._worker_state = "retrying_audio"
-                logger.warning("检测循环异常，将在 %.1fs 后重试: %s", retry_seconds, exc)
+                logger.warning("audio/detection loop failed; retrying in %.1fs: %s", retry_seconds, exc)
                 self.broadcast({"type": p.TYPE_ERROR, "message": self._error})
                 if self._shutdown_flag.wait(retry_seconds):
                     break
                 retry_seconds = min(retry_seconds * 2.0, 10.0)
 
         self._worker_state = "stopped"
-        logger.info("检测线程退出")
+        logger.info("wake detector worker stopped")
 
-    # ---------------- 启动 / 阻塞运行 ----------------
+    async def ws_handler(self, websocket) -> None:
+        path = self._ws_path(websocket)
+        client = self._ws_client_name(websocket)
+        if path != self.cfg.service.ws_path:
+            logger.warning("WebSocket rejected path=%s client=%s", path, client)
+            await websocket.close(code=1008, reason="unsupported path")
+            return
+
+        if self._ws_clients_lock is None:
+            self._ws_clients_lock = asyncio.Lock()
+        async with self._ws_clients_lock:
+            self._ws_clients.add(websocket)
+        logger.info("WebSocket connected client=%s", client)
+        try:
+            await self._ws_send_json(websocket, self.status())
+            async for message in websocket:
+                if isinstance(message, bytes):
+                    await self._ws_send_json(websocket, {"type": p.TYPE_ERROR, "message": "binary input is not supported"})
+                    continue
+                try:
+                    payload = json.loads(message)
+                    if not isinstance(payload, dict):
+                        raise ValueError("message must be a JSON object")
+                    await self._dispatch_ws(websocket, payload)
+                except Exception as exc:
+                    await self._ws_send_json(websocket, {"type": p.TYPE_ERROR, "message": str(exc)})
+        except ConnectionClosed:
+            pass
+        finally:
+            if self._ws_clients_lock is not None:
+                async with self._ws_clients_lock:
+                    self._ws_clients.discard(websocket)
+            logger.info("WebSocket disconnected client=%s", client)
+
+    async def _dispatch_ws(self, websocket, payload: dict) -> None:
+        cmd = str(payload.get("type") or payload.get("cmd") or "")
+        if cmd == p.CMD_START:
+            error = self.start_listening()
+            await self._ws_send_json(websocket, error or {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+        elif cmd == p.CMD_STOP:
+            self.stop_listening()
+            await self._ws_send_json(websocket, {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+        elif cmd == p.CMD_STATUS:
+            await self._ws_send_json(websocket, self.status())
+        elif cmd == p.CMD_PING:
+            await self._ws_send_json(websocket, {"type": p.TYPE_PONG})
+        elif cmd == p.CMD_SHUTDOWN:
+            await self._ws_send_json(websocket, {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+            self.shutdown()
+        else:
+            await self._ws_send_json(websocket, {"type": p.TYPE_ERROR, "message": f"unsupported command: {cmd}"})
+
+    async def ws_serve_forever(self) -> None:
+        self._ws_loop = asyncio.get_running_loop()
+        self._ws_clients_lock = asyncio.Lock()
+        self._ws_shutdown = asyncio.Event()
+        async with websockets.serve(
+            self.ws_handler,
+            self.cfg.service.host,
+            self.cfg.service.ws_port,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=None,
+        ):
+            logger.info(
+                "WakeUp WebSocket listening url=ws://%s:%d%s",
+                self.cfg.service.host,
+                self.cfg.service.ws_port,
+                self.cfg.service.ws_path,
+            )
+            await self._ws_shutdown.wait()
+
+    def _run_ws_server(self) -> None:
+        try:
+            asyncio.run(self.ws_serve_forever())
+        except Exception as exc:
+            if not self._shutdown_flag.is_set():
+                logger.exception("WakeUp WebSocket service failed: %s", exc)
+
+    async def _ws_broadcast(self, message: dict) -> None:
+        if self._ws_clients_lock is None:
+            return
+        async with self._ws_clients_lock:
+            clients = list(self._ws_clients)
+        if not clients:
+            return
+
+        payload = json.dumps(message, ensure_ascii=False)
+        dead = []
+        for client in clients:
+            try:
+                await client.send(payload)
+            except Exception:
+                dead.append(client)
+        if dead:
+            async with self._ws_clients_lock:
+                for client in dead:
+                    self._ws_clients.discard(client)
+
+    def _schedule_ws_broadcast(self, message: dict) -> None:
+        if self._ws_loop is None or self._ws_loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(self._ws_broadcast(message), self._ws_loop)
+
+    async def _ws_send_json(self, websocket, message: dict) -> None:
+        await websocket.send(json.dumps(message, ensure_ascii=False))
+
+    def _ws_path(self, websocket) -> str | None:
+        path = getattr(websocket, "path", None)
+        if path is not None:
+            return path
+        request = getattr(websocket, "request", None)
+        return getattr(request, "path", None)
+
+    def _ws_client_name(self, websocket) -> str:
+        remote = websocket.remote_address
+        if isinstance(remote, tuple) and len(remote) >= 2:
+            return f"{remote[0]}:{remote[1]}"
+        return str(remote)
+
     def serve_forever(self) -> None:
-        self._worker = threading.Thread(target=self._run_worker, name="detector",
-                                        daemon=True)
+        self._worker = threading.Thread(target=self._run_worker, name="detector", daemon=True)
         self._worker.start()
 
+        if self.cfg.service.ws_enabled:
+            self._ws_thread = threading.Thread(target=self._run_ws_server, name="wakeup-ws", daemon=True)
+            self._ws_thread.start()
+
+        if self.cfg.service.tcp_enabled:
+            self._serve_tcp_forever()
+        else:
+            try:
+                while not self._shutdown_flag.wait(0.25):
+                    pass
+            finally:
+                self._cleanup()
+
+    def _serve_tcp_forever(self) -> None:
         service = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
-                conn = _ClientConn(self.wfile)
+                conn = _TcpClientConn(self.wfile)
                 service.add_client(conn)
                 conn.send(service.status())
                 peer = self.client_address
-                logger.info("客户端接入: %s", peer)
+                logger.info("TCP client connected %s", peer)
                 try:
                     for raw in self.rfile:
                         raw = raw.strip()
@@ -204,22 +340,19 @@ class WakeWordService:
                     pass
                 finally:
                     service.remove_client(conn)
-                    logger.info("客户端断开: %s", peer)
+                    logger.info("TCP client disconnected %s", peer)
 
-            def _dispatch(self, conn: _ClientConn, raw: bytes):
+            def _dispatch(self, conn: _TcpClientConn, raw: bytes):
                 try:
                     msg = p.decode(raw)
                     cmd = msg.get("cmd")
                 except Exception:
-                    conn.send({"type": p.TYPE_ERROR, "message": "非法 JSON"})
+                    conn.send({"type": p.TYPE_ERROR, "message": "invalid JSON"})
                     return
 
                 if cmd == p.CMD_START:
                     error = service.start_listening()
-                    if error is not None:
-                        conn.send(error)
-                    else:
-                        conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+                    conn.send(error or {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
                 elif cmd == p.CMD_STOP:
                     service.stop_listening()
                     conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
@@ -231,7 +364,7 @@ class WakeWordService:
                     conn.send({"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
                     service.shutdown()
                 else:
-                    conn.send({"type": p.TYPE_ERROR, "message": f"未知命令: {cmd}"})
+                    conn.send({"type": p.TYPE_ERROR, "message": f"unknown command: {cmd}"})
 
         class Server(socketserver.ThreadingTCPServer):
             allow_reuse_address = True
@@ -240,19 +373,32 @@ class WakeWordService:
 
         host, port = self.cfg.service.host, self.cfg.service.port
         self._server = Server((host, port), Handler)
-        logger.info("控制接口监听 %s:%d（start_listening=%s）",
-                    host, port, self._listen_flag.is_set())
+        logger.info("WakeUp TCP listening %s:%d start_listening=%s", host, port, self._listen_flag.is_set())
         try:
             self._server.serve_forever()
         finally:
             self._server.server_close()
-            self._shutdown_flag.set()
-            self._listen_flag.set()
-            with self._clients_lock:
-                self._clients.clear()
-            if self._worker is not None and self._worker.is_alive():
-                self._worker.join(timeout=3.0)
-            logger.info("服务已停止")
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        self._shutdown_flag.set()
+        self._listen_flag.set()
+        self._request_ws_shutdown()
+        with self._tcp_clients_lock:
+            self._tcp_clients.clear()
+        if self._worker is not None and self._worker.is_alive():
+            self._worker.join(timeout=3.0)
+        if self._ws_thread is not None and self._ws_thread.is_alive():
+            self._ws_thread.join(timeout=3.0)
+        logger.info("WakeUp service stopped")
+
+    def _request_ws_shutdown(self) -> None:
+        if self._ws_loop is None or self._ws_shutdown is None or self._ws_loop.is_closed():
+            return
+        try:
+            self._ws_loop.call_soon_threadsafe(self._ws_shutdown.set)
+        except RuntimeError:
+            return
 
 
 def run_service(cfg: Config) -> None:

@@ -12,10 +12,12 @@
 from .detector import WakeWordDetector, DetectionEvent
 from .server import WakeWordService
 from .client import ServiceClient
+from .ws_client import WsServiceClient
 
 __all__ = [
     "WakeWordDetector",
     "DetectionEvent",
     "WakeWordService",
     "ServiceClient",
+    "WsServiceClient",
 ]

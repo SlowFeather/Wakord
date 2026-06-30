@@ -19,15 +19,16 @@ dependencies = [
     "sounddevice",
     "onnxruntime",
     "openwakeword",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]
-runtime = ["numpy<2", "scipy", "soundfile", "pyyaml", "tqdm", "sounddevice", "onnxruntime", "openwakeword"]
+runtime = ["numpy<2", "scipy", "soundfile", "pyyaml", "tqdm", "sounddevice", "onnxruntime", "openwakeword", "websockets>=12"]
 train = ["torch", "sherpa-onnx", "onnxscript"]
 vad = ["webrtcvad-wheels"]
 edge = ["edge-tts"]
 export = ["onnx>=1.16", "onnxsim", "onnx2tf", "onnx-graphsurgeon", "sng4onnx", "tf-keras", "tensorflow"]
-dev = ["pytest"]
+dev = ["pytest", "websockets>=12"]
 all = [
     "torch",
     "sherpa-onnx",
@@ -35,6 +36,7 @@ all = [
     "webrtcvad-wheels",
     "edge-tts",
     "pytest",
+    "websockets>=12",
 ]
 
 [project.scripts]

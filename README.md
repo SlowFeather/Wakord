@@ -272,6 +272,45 @@ git push -u origin main
 
 ---
 
+## WebSocket 控制接口
+
+服务默认同时提供 WebSocket 和旧 TCP JSON-lines 控制接口：
+
+- WebSocket: `ws://127.0.0.1:8766/v1/wake/ws`
+- TCP JSON-lines: `127.0.0.1:8765`
+
+CLI 默认使用 WebSocket：
+
+```powershell
+wakeup ctl status
+wakeup events
+```
+
+需要旧 TCP 协议时：
+
+```powershell
+wakeup ctl status --transport tcp
+wakeup events --transport tcp
+```
+
+WebSocket 消息：
+
+```json
+{"type":"ping"}
+{"type":"start"}
+{"type":"stop"}
+{"type":"status"}
+{"type":"shutdown"}
+```
+
+唤醒事件：
+
+```json
+{"type":"wake","model":"xiaoyuan","score":0.97,"ts":1700000000.0}
+```
+
+---
+
 ## 开发
 
 ```powershell

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 
 from ._logging import get_logger, setup_logging
@@ -28,6 +29,9 @@ def _add_common(sp: argparse.ArgumentParser) -> None:
 def _add_client_opts(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--host", default=None, help="覆盖服务地址")
     sp.add_argument("--port", type=int, default=None, help="覆盖服务端口")
+    sp.add_argument("--transport", choices=["ws", "tcp"], default="ws", help="控制协议，默认 WebSocket")
+    sp.add_argument("--ws-port", type=int, default=None, help="覆盖 WebSocket 端口")
+    sp.add_argument("--ws-path", default=None, help="覆盖 WebSocket 路径")
 
 
 def _add_audio_device_opt(sp: argparse.ArgumentParser) -> None:
@@ -162,7 +166,14 @@ def _client_cfg(cfg, args):
     if getattr(args, "host", None):
         cfg.service.host = args.host
     if getattr(args, "port", None):
-        cfg.service.port = args.port
+        if getattr(args, "transport", "tcp") == "ws":
+            cfg.service.ws_port = args.port
+        else:
+            cfg.service.port = args.port
+    if getattr(args, "ws_port", None):
+        cfg.service.ws_port = args.ws_port
+    if getattr(args, "ws_path", None):
+        cfg.service.ws_path = args.ws_path
     return cfg
 
 
@@ -241,8 +252,18 @@ def cmd_serve(args) -> int:
 
 def cmd_ctl(args) -> int:
     from .service.client import ServiceClient
+    from .service.ws_client import wake_ws_url
 
     cfg = _client_cfg(load_config(args.config), args)
+    if args.transport == "ws":
+        url = wake_ws_url(cfg.service.host, cfg.service.ws_port, cfg.service.ws_path)
+        try:
+            resp = asyncio.run(_ws_command(url, args.action))
+            print(resp)
+        except OSError as exc:
+            logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
+            return 1
+        return 0
     try:
         with ServiceClient(cfg.service.host, cfg.service.port) as cli:
             resp = cli.command(args.action)
@@ -255,8 +276,19 @@ def cmd_ctl(args) -> int:
 
 def cmd_events(args) -> int:
     from .service.client import ServiceClient
+    from .service.ws_client import wake_ws_url
 
     cfg = _client_cfg(load_config(args.config), args)
+    if args.transport == "ws":
+        url = wake_ws_url(cfg.service.host, cfg.service.ws_port, cfg.service.ws_path)
+        try:
+            asyncio.run(_print_ws_events(url))
+        except KeyboardInterrupt:
+            pass
+        except OSError as exc:
+            logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
+            return 1
+        return 0
     try:
         with ServiceClient(cfg.service.host, cfg.service.port) as cli:
             print(f"已连接 {cfg.service.host}:{cfg.service.port}，等待唤醒事件（Ctrl+C 退出）...")
@@ -271,6 +303,25 @@ def cmd_events(args) -> int:
         logger.error("无法连接服务: %s", exc)
         return 1
     return 0
+
+
+async def _ws_command(url: str, action: str) -> dict | None:
+    from .service.ws_client import WsServiceClient
+
+    async with WsServiceClient(url) as cli:
+        return await cli.command(action)
+
+
+async def _print_ws_events(url: str) -> None:
+    from .service.ws_client import WsServiceClient
+
+    async with WsServiceClient(url) as cli:
+        print(f"已连接 {url}，等待唤醒事件（Ctrl+C 退出）...")
+        async for msg in cli.messages():
+            if msg.get("type") == "wake":
+                print(f"🔔 唤醒! model={msg['model']} score={msg['score']} ts={msg['ts']}")
+            else:
+                print(f"· {msg}")
 
 
 def cmd_listen(args) -> int:

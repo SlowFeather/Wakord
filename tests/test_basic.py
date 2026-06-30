@@ -361,6 +361,99 @@ def test_service_broadcasts_wake_with_fake_audio_and_detector(tmp_path, monkeypa
     thread.join(timeout=3.0)
 
 
+def test_service_websocket_control_and_wake_broadcast(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import socket
+    import threading
+    import time
+
+    import websockets
+
+    from wakeup.service.detector import DetectionEvent
+    from wakeup.service.server import WakeWordService
+
+    cfg = load_config()
+    cfg.paths.base_dir = str(tmp_path / "artifacts")
+    cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
+    cfg.service.tcp_enabled = False
+    cfg.service.ws_enabled = True
+    cfg.service.ws_port = _free_port()
+    cfg.service.start_listening = False
+
+    class FakeDetector:
+        def __init__(self, _cfg):
+            self.sent = False
+            self.last_active_score = 0.0
+
+        def reset(self):
+            self.sent = False
+
+        def process(self, _frame):
+            self.last_active_score = 0.92
+            if not self.sent:
+                self.sent = True
+                return DetectionEvent("xiaoyuan", 0.92, time.time())
+            return None
+
+    class FakeAudio:
+        def __init__(self, _cfg):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def read(self, timeout=0.5):
+            time.sleep(0.01)
+            return np.zeros(1280, dtype=np.int16)
+
+    monkeypatch.setattr("wakeup.service.server.WakeWordDetector", FakeDetector)
+    monkeypatch.setattr("wakeup.service.server.AudioInput", FakeAudio)
+
+    service = WakeWordService(cfg)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    assert service._ready.wait(timeout=3.0)
+    deadline = time.monotonic() + 3.0
+    while service._ws_loop is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service._ws_loop is not None
+
+    async def scenario():
+        url = f"ws://{cfg.service.host}:{cfg.service.ws_port}{cfg.service.ws_path}"
+        async with websockets.connect(url, max_size=None) as ws:
+            first = json.loads(await ws.recv())
+            assert first["type"] == "status"
+            await ws.send(json.dumps({"type": "ping"}))
+            assert json.loads(await ws.recv())["type"] == "pong"
+            await ws.send(json.dumps({"type": "start"}))
+            msg = None
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                if msg.get("type") == "wake":
+                    break
+            assert msg["type"] == "wake"
+            assert msg["model"] == "xiaoyuan"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        service.shutdown()
+        thread.join(timeout=3.0)
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 def test_service_retries_audio_after_start_failure(tmp_path, monkeypatch):
     import socket
     import threading
