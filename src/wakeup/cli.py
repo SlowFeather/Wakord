@@ -2,7 +2,7 @@
 
 子命令：
     train      训练全流程（中文 TTS 正样本 -> 特征 -> 训练 -> 导出 ONNX）
-    serve      启动常驻监听服务（可被其他程序通过 TCP 控制）
+    serve      启动常驻监听服务（可被其他程序通过 WebSocket 控制）
     ctl        控制运行中的服务：start / stop / status / shutdown
     events     连接服务并持续打印唤醒事件
     listen     前台直接监听（不起服务），用于现场调阈值
@@ -28,10 +28,8 @@ def _add_common(sp: argparse.ArgumentParser) -> None:
 
 def _add_client_opts(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--host", default=None, help="覆盖服务地址")
-    sp.add_argument("--port", type=int, default=None, help="覆盖服务端口")
-    sp.add_argument("--transport", choices=["ws", "tcp"], default="ws", help="控制协议，默认 WebSocket")
-    sp.add_argument("--ws-port", type=int, default=None, help="覆盖 WebSocket 端口")
-    sp.add_argument("--ws-path", default=None, help="覆盖 WebSocket 路径")
+    sp.add_argument("--port", type=int, default=None, help="覆盖 WebSocket 服务端口")
+    sp.add_argument("--ws-path", default=None, help="覆盖 WebSocket 服务路径")
 
 
 def _add_audio_device_opt(sp: argparse.ArgumentParser) -> None:
@@ -166,12 +164,7 @@ def _client_cfg(cfg, args):
     if getattr(args, "host", None):
         cfg.service.host = args.host
     if getattr(args, "port", None):
-        if getattr(args, "transport", "tcp") == "ws":
-            cfg.service.ws_port = args.port
-        else:
-            cfg.service.port = args.port
-    if getattr(args, "ws_port", None):
-        cfg.service.ws_port = args.ws_port
+        cfg.service.port = args.port
     if getattr(args, "ws_path", None):
         cfg.service.ws_path = args.ws_path
     return cfg
@@ -251,56 +244,30 @@ def cmd_serve(args) -> int:
 
 
 def cmd_ctl(args) -> int:
-    from .service.client import ServiceClient
     from .service.ws_client import wake_ws_url
 
     cfg = _client_cfg(load_config(args.config), args)
-    if args.transport == "ws":
-        url = wake_ws_url(cfg.service.host, cfg.service.ws_port, cfg.service.ws_path)
-        try:
-            resp = asyncio.run(_ws_command(url, args.action))
-            print(resp)
-        except OSError as exc:
-            logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
-            return 1
-        return 0
+    url = wake_ws_url(cfg.service.host, cfg.service.port, cfg.service.ws_path)
     try:
-        with ServiceClient(cfg.service.host, cfg.service.port) as cli:
-            resp = cli.command(args.action)
-            print(resp)
-    except OSError as exc:
-        logger.error("无法连接服务 %s:%d —— %s", cfg.service.host, cfg.service.port, exc)
+        resp = asyncio.run(_ws_command(url, args.action))
+        print(resp)
+    except Exception as exc:
+        logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
         return 1
     return 0
 
 
 def cmd_events(args) -> int:
-    from .service.client import ServiceClient
     from .service.ws_client import wake_ws_url
 
     cfg = _client_cfg(load_config(args.config), args)
-    if args.transport == "ws":
-        url = wake_ws_url(cfg.service.host, cfg.service.ws_port, cfg.service.ws_path)
-        try:
-            asyncio.run(_print_ws_events(url))
-        except KeyboardInterrupt:
-            pass
-        except OSError as exc:
-            logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
-            return 1
-        return 0
+    url = wake_ws_url(cfg.service.host, cfg.service.port, cfg.service.ws_path)
     try:
-        with ServiceClient(cfg.service.host, cfg.service.port) as cli:
-            print(f"已连接 {cfg.service.host}:{cfg.service.port}，等待唤醒事件（Ctrl+C 退出）...")
-            for msg in cli.messages():
-                if msg.get("type") == "wake":
-                    print(f"🔔 唤醒! model={msg['model']} score={msg['score']} ts={msg['ts']}")
-                else:
-                    print(f"· {msg}")
+        asyncio.run(_print_ws_events(url))
     except KeyboardInterrupt:
         pass
-    except OSError as exc:
-        logger.error("无法连接服务: %s", exc)
+    except Exception as exc:
+        logger.error("无法连接 WebSocket 服务 %s —— %s", url, exc)
         return 1
     return 0
 

@@ -9,12 +9,13 @@ import signal
 import subprocess
 import sys
 import time
+import asyncio
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..config import Config
 from .._logging import get_logger
-from .client import ServiceClient
+from .ws_client import WsServiceClient, wake_ws_url
 
 logger = get_logger(__name__)
 
@@ -56,11 +57,19 @@ def _pid_alive(pid: int | None) -> bool:
 
 def _service_responds(cfg: Config, timeout: float = 0.5) -> bool:
     try:
-        with ServiceClient(cfg.service.host, cfg.service.port, timeout=timeout) as client:
-            resp = client.status()
+        resp = _run_ws_command(cfg, "status", timeout=timeout)
         return bool(resp and resp.get("type") == "status")
     except Exception:
         return False
+
+
+def _run_ws_command(cfg: Config, command: str, *, timeout: float = 2.0) -> dict | None:
+    async def _command() -> dict | None:
+        url = wake_ws_url(cfg.service.host, cfg.service.port, cfg.service.ws_path)
+        async with WsServiceClient(url, timeout=timeout) as client:
+            return await client.command(command)
+
+    return asyncio.run(_command())
 
 
 def status_daemon(cfg: Config) -> dict:
@@ -180,8 +189,7 @@ def stop_daemon(cfg: Config, *, timeout: float = 10.0) -> dict:
     pid = _read_pid(paths.pid_file)
 
     try:
-        with ServiceClient(cfg.service.host, cfg.service.port, timeout=2.0) as client:
-            client.shutdown()
+        _run_ws_command(cfg, "shutdown", timeout=2.0)
     except Exception as exc:
         logger.debug("service shutdown command failed: %s", exc)
 

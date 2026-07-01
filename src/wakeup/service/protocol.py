@@ -1,14 +1,14 @@
-"""控制协议：本机 TCP 上的换行分隔 JSON（JSON-lines）。
+"""WebSocket 控制协议的消息常量与 JSON 编解码工具。
 
-任何语言的程序都能用「连上 TCP、按行发 JSON、按行读 JSON」的方式集成。
+任何语言的程序都能连接 ``ws://127.0.0.1:8766/v1/wake/ws``，发送/接收 JSON 对象来集成。
 
 客户端 -> 服务端（命令）::
 
-    {"cmd": "start"}        开始监听
-    {"cmd": "stop"}         停止监听（释放麦克风，省电）
-    {"cmd": "status"}       查询状态
-    {"cmd": "ping"}         连通性测试
-    {"cmd": "shutdown"}     关闭整个服务
+    {"type": "start"}        开始监听
+    {"type": "stop"}         停止监听（释放麦克风，省电）
+    {"type": "status"}       查询状态
+    {"type": "ping"}         连通性测试
+    {"type": "shutdown"}     关闭整个服务
 
 服务端 -> 客户端（响应 / 事件）::
 
@@ -40,12 +40,12 @@ TYPE_PONG = "pong"
 
 
 def encode(message: dict) -> bytes:
-    """dict -> 一行 JSON（含换行）。"""
-    return (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+    """dict -> UTF-8 JSON bytes."""
+    return json.dumps(message, ensure_ascii=False).encode("utf-8")
 
 
 def decode(line: bytes | str) -> dict:
-    """一行 JSON -> dict。"""
+    """UTF-8 JSON bytes/string -> dict."""
     if isinstance(line, bytes):
         line = line.decode("utf-8")
     return json.loads(line)

@@ -78,10 +78,7 @@ class TrainConfig:
 @dataclass
 class ServiceConfig:
     host: str = "127.0.0.1"
-    port: int = 8765
-    tcp_enabled: bool = True
-    ws_enabled: bool = True
-    ws_port: int = 8766
+    port: int = 8766
     ws_path: str = "/v1/wake/ws"
     model_name: str = "xiaoyuan"
     sample_rate: int = 16000
@@ -95,8 +92,6 @@ class ServiceConfig:
     vad_aggressiveness: int = 2  # webrtc 0~3
     vad_silero_threshold: float = 0.5  # silero 人声概率阈值 0~1
     energy_threshold: float = 0.012
-    hangover_frames: int = 8
-    preroll_frames: int = 16
 
 
 @dataclass
@@ -266,10 +261,6 @@ def validate_config(cfg: Config) -> None:
 
     if not 1 <= cfg.service.port <= 65535:
         raise ValueError(f"service.port must be 1..65535, got {cfg.service.port}")
-    if not 1 <= cfg.service.ws_port <= 65535:
-        raise ValueError(f"service.ws_port must be 1..65535, got {cfg.service.ws_port}")
-    if cfg.service.tcp_enabled and cfg.service.ws_enabled and cfg.service.port == cfg.service.ws_port:
-        raise ValueError("service.port and service.ws_port must be different when both TCP and WS are enabled")
     if not cfg.service.ws_path.startswith("/"):
         raise ValueError("service.ws_path must start with /")
     _require_positive("service.sample_rate", cfg.service.sample_rate)
@@ -284,8 +275,6 @@ def validate_config(cfg: Config) -> None:
     _require_range("service.vad_silero_threshold", cfg.service.vad_silero_threshold, 0.0, 1.0)
     if cfg.service.energy_threshold < 0:
         raise ValueError("service.energy_threshold must be >= 0")
-    if cfg.service.hangover_frames < 0 or cfg.service.preroll_frames < 0:
-        raise ValueError("service.hangover_frames and service.preroll_frames must be >= 0")
 
 
 def load_config(path: str | Path | None = None) -> Config:

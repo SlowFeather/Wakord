@@ -3,7 +3,7 @@
 子包：
     wakeup.data      —— 数据准备（中文 TTS 正样本、负样本特征、特征提取）
     wakeup.training  —— 模型定义、训练、导出
-    wakeup.service   —— 实时监听服务（VAD 门控 + 唤醒词检测 + 可控制的 TCP 接口）
+    wakeup.service   —— 实时监听服务（VAD 门控 + 唤醒词检测 + WebSocket 控制接口）
 """
 
 from .config import Config, load_config

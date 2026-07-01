@@ -13,7 +13,7 @@ from wakeup.training.dataset import fix_frames
 def test_config_defaults():
     cfg = load_config()
     assert cfg.data.target_word == "小元"
-    assert cfg.service.port == 8765
+    assert cfg.service.port == 8766
     assert cfg.fs.model_path.name == "xiaoyuan.onnx"
 
 
@@ -157,70 +157,54 @@ def test_safe_extract_rejects_path_traversal(tmp_path):
             safe_extract_tar(tar, tmp_path / "out")
 
 
-def test_service_client_skips_greeting_and_broadcast():
-    import socketserver
-    import threading
+def test_ws_service_client_reads_initial_status_and_ack():
+    import asyncio
+    import json
 
-    from wakeup.service import protocol as p
-    from wakeup.service.client import ServiceClient
+    import websockets
 
-    class Handler(socketserver.StreamRequestHandler):
-        def handle(self):
-            self.wfile.write(p.encode({"type": "status", "listening": False}))
-            self.wfile.flush()
-            raw = self.rfile.readline()
-            cmd = p.decode(raw)["cmd"]
-            self.wfile.write(p.encode({"type": "status", "listening": True}))
-            self.wfile.write(p.encode({"type": "ack", "cmd": cmd, "ok": True}))
-            self.wfile.flush()
+    from wakeup.service.ws_client import WsServiceClient
 
-    class Server(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
+    async def handler(websocket):
+        await websocket.send(json.dumps({"type": "status", "listening": False}))
+        raw = await websocket.recv()
+        cmd = json.loads(raw)["type"]
+        await websocket.send(json.dumps({"type": "status", "listening": True}))
+        await websocket.send(json.dumps({"type": "ack", "cmd": cmd, "ok": True}))
 
-    server = Server(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        host, port = server.server_address
-        with ServiceClient(host, port, timeout=2.0) as client:
-            assert client.initial_status["type"] == "status"
-            assert client.command("start") == {"type": "ack", "cmd": "start", "ok": True}
-    finally:
-        server.shutdown()
-        server.server_close()
+    async def scenario():
+        port = _free_port()
+        async with websockets.serve(handler, "127.0.0.1", port):
+            async with WsServiceClient(f"ws://127.0.0.1:{port}/v1/wake/ws", timeout=2.0) as client:
+                assert client.initial_status["type"] == "status"
+                assert await client.command("start") == {"type": "ack", "cmd": "start", "ok": True}
+
+    asyncio.run(scenario())
 
 
-def test_service_client_command_skips_mixed_push_messages():
-    import socketserver
-    import threading
+def test_ws_service_client_command_skips_mixed_push_messages():
+    import asyncio
+    import json
 
-    from wakeup.service import protocol as p
-    from wakeup.service.client import ServiceClient
+    import websockets
 
-    class Handler(socketserver.StreamRequestHandler):
-        def handle(self):
-            self.wfile.write(p.encode({"type": "status", "listening": False}))
-            self.wfile.flush()
-            raw = self.rfile.readline()
-            cmd = p.decode(raw)["cmd"]
-            self.wfile.write(p.encode({"type": "wake", "model": "xiaoyuan", "score": 0.9}))
-            self.wfile.write(p.encode({"type": "status", "listening": True}))
-            self.wfile.write(p.encode({"type": "ack", "cmd": cmd, "ok": True}))
-            self.wfile.flush()
+    from wakeup.service.ws_client import WsServiceClient
 
-    class Server(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
+    async def handler(websocket):
+        await websocket.send(json.dumps({"type": "status", "listening": False}))
+        raw = await websocket.recv()
+        cmd = json.loads(raw)["type"]
+        await websocket.send(json.dumps({"type": "wake", "model": "xiaoyuan", "score": 0.9}))
+        await websocket.send(json.dumps({"type": "status", "listening": True}))
+        await websocket.send(json.dumps({"type": "ack", "cmd": cmd, "ok": True}))
 
-    server = Server(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        host, port = server.server_address
-        with ServiceClient(host, port, timeout=2.0) as client:
-            assert client.command("start") == {"type": "ack", "cmd": "start", "ok": True}
-    finally:
-        server.shutdown()
-        server.server_close()
+    async def scenario():
+        port = _free_port()
+        async with websockets.serve(handler, "127.0.0.1", port):
+            async with WsServiceClient(f"ws://127.0.0.1:{port}/v1/wake/ws", timeout=2.0) as client:
+                assert await client.command("start") == {"type": "ack", "cmd": "start", "ok": True}
+
+    asyncio.run(scenario())
 
 
 def test_service_start_returns_error_when_not_ready():
@@ -283,28 +267,32 @@ def test_eval_audio_dirs_with_fake_detector(tmp_path, monkeypatch):
 
 
 def test_service_broadcasts_wake_with_fake_audio_and_detector(tmp_path, monkeypatch):
-    import socket
+    import asyncio
+    import json
     import threading
     import time
 
+    import websockets
+
     from wakeup.service.detector import DetectionEvent
     from wakeup.service.server import WakeWordService
-    from wakeup.service import protocol as p
 
     cfg = load_config()
     cfg.paths.base_dir = str(tmp_path / "artifacts")
     cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
-    cfg.service.port = 0
+    cfg.service.port = _free_port()
     cfg.service.start_listening = False
 
     class FakeDetector:
         def __init__(self, _cfg):
             self.sent = False
+            self.last_active_score = 0.0
 
         def reset(self):
             self.sent = False
 
         def process(self, _frame):
+            self.last_active_score = 0.91
             if not self.sent:
                 self.sent = True
                 return DetectionEvent("xiaoyuan", 0.91, time.time())
@@ -331,40 +319,33 @@ def test_service_broadcasts_wake_with_fake_audio_and_detector(tmp_path, monkeypa
     service = WakeWordService(cfg)
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
-    deadline = time.monotonic() + 3.0
-    while service._server is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert service._server is not None
     assert service._ready.wait(timeout=3.0)
-    host, port = service._server.server_address
 
-    with socket.create_connection((host, port), timeout=2.0) as sock:
-        rfile = sock.makefile("rb")
-        wfile = sock.makefile("wb")
-        first = p.decode(rfile.readline())
-        assert first["type"] == "status"
-        wfile.write(p.encode({"cmd": "start"}))
-        wfile.flush()
-        msg = None
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            line = rfile.readline()
-            if not line:
-                break
-            msg = p.decode(line)
-            if msg.get("type") == "wake":
-                break
-        assert msg["type"] == "wake"
-        assert msg["model"] == "xiaoyuan"
+    async def scenario():
+        url = f"ws://{cfg.service.host}:{cfg.service.port}{cfg.service.ws_path}"
+        async with websockets.connect(url, max_size=None) as ws:
+            first = json.loads(await ws.recv())
+            assert first["type"] == "status"
+            await ws.send(json.dumps({"type": "start"}))
+            msg = None
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                if msg.get("type") == "wake":
+                    break
+            assert msg["type"] == "wake"
+            assert msg["model"] == "xiaoyuan"
 
-    service.shutdown()
-    thread.join(timeout=3.0)
+    try:
+        asyncio.run(scenario())
+    finally:
+        service.shutdown()
+        thread.join(timeout=3.0)
 
 
 def test_service_websocket_control_and_wake_broadcast(tmp_path, monkeypatch):
     import asyncio
     import json
-    import socket
     import threading
     import time
 
@@ -376,9 +357,7 @@ def test_service_websocket_control_and_wake_broadcast(tmp_path, monkeypatch):
     cfg = load_config()
     cfg.paths.base_dir = str(tmp_path / "artifacts")
     cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
-    cfg.service.tcp_enabled = False
-    cfg.service.ws_enabled = True
-    cfg.service.ws_port = _free_port()
+    cfg.service.port = _free_port()
     cfg.service.start_listening = False
 
     class FakeDetector:
@@ -418,12 +397,12 @@ def test_service_websocket_control_and_wake_broadcast(tmp_path, monkeypatch):
     thread.start()
     assert service._ready.wait(timeout=3.0)
     deadline = time.monotonic() + 3.0
-    while service._ws_loop is None and time.monotonic() < deadline:
+    while service._loop is None and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert service._ws_loop is not None
+    assert service._loop is not None
 
     async def scenario():
-        url = f"ws://{cfg.service.host}:{cfg.service.ws_port}{cfg.service.ws_path}"
+        url = f"ws://{cfg.service.host}:{cfg.service.port}{cfg.service.ws_path}"
         async with websockets.connect(url, max_size=None) as ws:
             first = json.loads(await ws.recv())
             assert first["type"] == "status"
@@ -455,18 +434,20 @@ def _free_port() -> int:
 
 
 def test_service_retries_audio_after_start_failure(tmp_path, monkeypatch):
-    import socket
+    import asyncio
+    import json
     import threading
     import time
 
-    from wakeup.service import protocol as p
+    import websockets
+
     from wakeup.service.detector import DetectionEvent
     from wakeup.service.server import WakeWordService
 
     cfg = load_config()
     cfg.paths.base_dir = str(tmp_path / "artifacts")
     cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
-    cfg.service.port = 0
+    cfg.service.port = _free_port()
     cfg.service.start_listening = True
 
     class FakeDetector:
@@ -511,27 +492,27 @@ def test_service_retries_audio_after_start_failure(tmp_path, monkeypatch):
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     deadline = time.monotonic() + 3.0
-    while service._server is None and time.monotonic() < deadline:
+    while service._loop is None and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert service._server is not None
-    host, port = service._server.server_address
+    assert service._loop is not None
 
-    try:
-        with socket.create_connection((host, port), timeout=2.0) as sock:
-            rfile = sock.makefile("rb")
-            assert p.decode(rfile.readline())["type"] == "status"
+    async def scenario():
+        url = f"ws://{cfg.service.host}:{cfg.service.port}{cfg.service.ws_path}"
+        async with websockets.connect(url, max_size=None) as ws:
+            first = json.loads(await ws.recv())
+            assert first["type"] == "status"
             msg = None
-            deadline = time.monotonic() + 4.0
-            while time.monotonic() < deadline:
-                line = rfile.readline()
-                if not line:
-                    break
-                msg = p.decode(line)
+            deadline = asyncio.get_running_loop().time() + 4.0
+            while asyncio.get_running_loop().time() < deadline:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
                 if msg.get("type") == "wake":
                     break
             assert msg["type"] == "wake"
             assert service.status()["audio_restart_count"] >= 1
             assert service.status()["worker_alive"] is True
+
+    try:
+        asyncio.run(scenario())
     finally:
         service.shutdown()
         thread.join(timeout=3.0)
@@ -546,7 +527,7 @@ def test_service_shutdown_stops_worker_thread(tmp_path, monkeypatch):
     cfg = load_config()
     cfg.paths.base_dir = str(tmp_path / "artifacts")
     cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
-    cfg.service.port = 0
+    cfg.service.port = _free_port()
     cfg.service.start_listening = False
 
     class FakeDetector:
@@ -565,9 +546,9 @@ def test_service_shutdown_stops_worker_thread(tmp_path, monkeypatch):
     thread = threading.Thread(target=service.serve_forever, daemon=True)
     thread.start()
     deadline = time.monotonic() + 3.0
-    while service._server is None and time.monotonic() < deadline:
+    while service._loop is None and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert service._server is not None
+    assert service._loop is not None
     assert service._ready.wait(timeout=3.0)
     service.shutdown()
     thread.join(timeout=3.0)

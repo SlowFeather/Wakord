@@ -33,11 +33,8 @@ train:
   seed: 42
 
 service:
-  host: "127.0.0.1"            # 控制接口监听地址（仅本机）
-  port: 8765                   # 控制接口端口
-  tcp_enabled: true             # 保留旧 TCP JSON-lines 控制接口
-  ws_enabled: true              # 启用 WebSocket 控制/事件接口
-  ws_port: 8766                 # WebSocket 端口
+  host: "127.0.0.1"            # WebSocket 控制接口监听地址（仅本机）
+  port: 8766                   # WebSocket 控制接口端口
   ws_path: "/v1/wake/ws"        # WebSocket 路径
   model_name: "xiaoyuan"       # 唤醒词模型名（事件回传里会带上）
   audio_device: null           # 音频输入设备 ID 或名称；null=使用系统默认输入设备
@@ -51,8 +48,6 @@ service:
   vad_aggressiveness: 2        # webrtc 模式 0~3，越大越严格（越不容易误判为人声）
   vad_silero_threshold: 0.5    # silero 人声概率阈值 0~1（偏低更灵敏、偏高更保守）
   energy_threshold: 0.012      # energy 模式的基准阈值（实际取与本底噪声×3 的较大者）
-  hangover_frames: 8           # 已废弃：现不做 VAD 触发门控（保留仅为兼容旧配置）
-  preroll_frames: 16           # 已废弃：现持续推理保持缓冲预热，无需前导回灌（保留仅为兼容旧配置）
 
   # 说明：监听时唤醒模型每帧都跑（openWakeWord 需连续音频，跳帧会漏检），按模型分+阈值+冷却触发。
   # vad_backend 现仅影响 `wakeup listen --debug` 的诊断显示。真正省电靠 stop 时释放麦克风。

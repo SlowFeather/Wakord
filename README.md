@@ -53,8 +53,8 @@ WakeUp_Project/
 │       ├── audio.py            #   麦克风采集
 │       ├── vad.py              #   人声检测（仅用于 listen --debug 诊断）
 │       ├── detector.py         #   持续推理 + 阈值 + 冷却去重（每帧跑模型保持缓冲预热）
-│       ├── server.py           #   可被控制的 TCP 服务
-│       ├── client.py           #   控制客户端
+│       ├── server.py           #   可被控制的 WebSocket 服务
+│       ├── ws_client.py        #   WebSocket 控制客户端
 │       └── protocol.py         #   控制协议
 ├── examples/control_service.py # 用别的程序控制服务的示例
 └── tests/                      # 轻量单元测试
@@ -193,13 +193,21 @@ wakeup events                # 持续打印唤醒事件
 见 [`examples/control_service.py`](examples/control_service.py)：
 
 ```python
-from wakeup.service.client import ServiceClient
+import asyncio
 
-with ServiceClient(host="127.0.0.1", port=8765) as c:
-    c.start()                       # 开始监听
-    for msg in c.messages():        # 接收事件
-        if msg["type"] == "wake":
-            print("唤醒!", msg["score"])
+from wakeup.service.ws_client import WsServiceClient, wake_ws_url
+
+
+async def main():
+    url = wake_ws_url("127.0.0.1", 8766, "/v1/wake/ws")
+    async with WsServiceClient(url) as c:
+        await c.start()             # 开始监听
+        async for msg in c.messages():
+            if msg["type"] == "wake":
+                print("唤醒!", msg["score"])
+
+
+asyncio.run(main())
 ```
 
 ---
@@ -222,19 +230,20 @@ F1、false positive rate 和逐条峰值分数，方便决定 `configs/config.ya
 
 ## 控制协议（任何语言都能集成）
 
-本机 TCP（默认 `127.0.0.1:8765`），**按行收发 JSON**：
+本机 WebSocket（默认 `ws://127.0.0.1:8766/v1/wake/ws`），收发 JSON 对象：
 
 | 方向 | 消息 | 说明 |
 |------|------|------|
-| 客户端→服务 | `{"cmd":"start"}` | 开始监听 |
-| 客户端→服务 | `{"cmd":"stop"}` | 停止监听（释放麦克风）|
-| 客户端→服务 | `{"cmd":"status"}` | 查询状态 |
-| 客户端→服务 | `{"cmd":"shutdown"}` | 关闭服务 |
+| 客户端→服务 | `{"type":"ping"}` | 连通性测试 |
+| 客户端→服务 | `{"type":"start"}` | 开始监听 |
+| 客户端→服务 | `{"type":"stop"}` | 停止监听（释放麦克风）|
+| 客户端→服务 | `{"type":"status"}` | 查询状态 |
+| 客户端→服务 | `{"type":"shutdown"}` | 关闭服务 |
 | 服务→客户端 | `{"type":"wake","model":"xiaoyuan","score":0.97,"ts":...}` | **唤醒事件（广播给所有连接）** |
 | 服务→客户端 | `{"type":"status","listening":true,...}` | 状态 |
 | 服务→客户端 | `{"type":"ack","cmd":"...","ok":true}` | 命令确认 |
 
-例如在任意语言里：连上 TCP → 发 `{"cmd":"start"}\n` → 逐行读取，遇到 `"type":"wake"` 即表示听到了唤醒词。
+例如在任意语言里：连接 WebSocket → 发 `{"type":"start"}` → 持续读取消息，遇到 `"type":"wake"` 即表示听到了唤醒词。
 
 ---
 
@@ -250,7 +259,7 @@ F1、false positive rate 和逐条峰值分数，方便决定 `configs/config.ya
    模型本身已在负样本上训练为判别器；误报靠调高 `threshold` 与 `cooldown_seconds` 控制。
 
 相关参数都在 `configs/config.yaml` 的 `service` 段（`threshold` / `cooldown_seconds`）。
-`vad_backend` / `vad_aggressiveness` 现仅影响 `--debug` 诊断显示；`preroll_frames` / `hangover_frames` 已废弃。
+`vad_backend` / `vad_aggressiveness` 现仅影响 `--debug` 诊断显示。
 
 > 调阈值/诊断：`wakeup listen --show-score` 看实时分；`wakeup listen --debug` 每帧打印
 > VAD/原始分/麦克风电平，用于定位"是 VAD 没抓到"还是"模型不认"。
@@ -269,47 +278,6 @@ git push -u origin main
 ```
 
 `artifacts/`、下载的大文件与训练好的模型已在 `.gitignore` 中排除。成品模型（`xiaoyuan.onnx`）建议用 **GitHub Release** 或 **Git LFS** 分发。
-
----
-
-## WebSocket 控制接口
-
-服务默认同时提供 WebSocket 和旧 TCP JSON-lines 控制接口：
-
-- WebSocket: `ws://127.0.0.1:8766/v1/wake/ws`
-- TCP JSON-lines: `127.0.0.1:8765`
-
-CLI 默认使用 WebSocket：
-
-```powershell
-wakeup ctl status
-wakeup events
-```
-
-需要旧 TCP 协议时：
-
-```powershell
-wakeup ctl status --transport tcp
-wakeup events --transport tcp
-```
-
-WebSocket 消息：
-
-```json
-{"type":"ping"}
-{"type":"start"}
-{"type":"stop"}
-{"type":"status"}
-{"type":"shutdown"}
-```
-
-唤醒事件：
-
-```json
-{"type":"wake","model":"xiaoyuan","score":0.97,"ts":1700000000.0}
-```
-
----
 
 ## 开发
 
