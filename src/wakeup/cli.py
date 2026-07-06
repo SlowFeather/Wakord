@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 
 from ._logging import get_logger, setup_logging
@@ -229,12 +230,17 @@ def cmd_fit(args) -> int:
 
 def cmd_serve(args) -> int:
     from .service.server import run_service
+    from ._logging import add_file_logging
 
     cfg = load_config(args.config)
     cfg = _client_cfg(cfg, args)
     cfg = _audio_cfg(cfg, args)
     if args.listen:
         cfg.service.start_listening = True
+    # 常驻服务写滚动文件日志（可用 WAKEUP_LOG_FILE 覆盖路径，设为空串禁用）
+    log_file = os.environ.get("WAKEUP_LOG_FILE", "artifacts/logs/wakeup.log")
+    if log_file:
+        add_file_logging(log_file)
     logger.info("启动服务，Ctrl+C 退出")
     try:
         run_service(cfg)

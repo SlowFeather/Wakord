@@ -176,7 +176,11 @@ wakeup daemon install --listen   # 注册开机/登录自启动（Windows: schta
 wakeup daemon uninstall
 ```
 
-日志默认写到 `artifacts/run/wakeup-service.log`。
+日志说明：
+
+- `wakeup serve` 常驻服务写滚动文件日志 `artifacts/logs/wakeup.log`（10MB × 5 份，UTF-8），可用环境变量 `WAKEUP_LOG_FILE` 覆盖路径、设为空串禁用
+- `wakeup daemon` 后台模式的输出重定向到 `artifacts/run/wakeup-service.log`
+- 日志格式与 ChatCaht 全家统一：`2026-07-06 10:09:29,554 INFO wakeup.service.server: 消息`，可被 ChatCaht Dashboard 直接解析
 
 ### 4）用命令行控制服务
 
