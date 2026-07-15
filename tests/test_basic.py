@@ -220,6 +220,7 @@ def test_service_start_returns_error_when_not_ready():
     assert "uptime_seconds" in status
     assert status["worker_state"] in {"starting", "failed"}
     assert status["audio_restart_count"] == 0
+    assert {"ready", "state", "model_loaded", "audio_open", "last_error"} <= status.keys()
 
 
 def test_eval_audio_dirs_with_fake_detector(tmp_path, monkeypatch):

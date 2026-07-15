@@ -28,7 +28,7 @@ train = ["torch", "sherpa-onnx", "onnxscript"]
 vad = ["webrtcvad-wheels"]
 edge = ["edge-tts"]
 export = ["onnx>=1.16", "onnxsim", "onnx2tf", "onnx-graphsurgeon", "sng4onnx", "tf-keras", "tensorflow"]
-dev = ["pytest", "websockets>=12"]
+dev = ["pytest", "websockets>=12", "ruff>=0.12", "mypy>=1.16", "pip-audit>=2.9"]
 all = [
     "torch",
     "sherpa-onnx",
@@ -38,6 +38,16 @@ all = [
     "pytest",
     "websockets>=12",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+files = ["src/wakeup/config.py", "src/wakeup/service/protocol.py", "src/wakeup/service/detector.py"]
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = true
+follow_imports = "skip"
 
 [project.scripts]
 wakeup = "wakeup.cli:main"

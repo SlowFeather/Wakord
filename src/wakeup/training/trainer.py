@@ -88,7 +88,6 @@ def train_classifier(cfg: Config, data: Dataset):
     Xtr = torch.from_numpy(data.X_train).to(device)
     ytr = torch.from_numpy(data.y_train).unsqueeze(1).to(device)
     Xva = torch.from_numpy(data.X_val).to(device)
-    yva = torch.from_numpy(data.y_val).unsqueeze(1).to(device)
 
     model = WakeWordModel(tf.target_frames, tf.embedding_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=tf.learning_rate)

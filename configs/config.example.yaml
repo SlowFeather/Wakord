@@ -1,0 +1,43 @@
+# WakeUp runtime/training example. Copy to configs/config.yaml for local overrides.
+paths:
+  base_dir: artifacts
+  model_path: models/xiaoyuan.onnx
+
+data:
+  target_word: "小元"
+  num_samples: 1000
+  clip_seconds: 3
+  speaker_id_min: 0
+  speaker_id_max: 173
+  speed_min: 0.8
+  speed_max: 1.4
+  audio_augment: true
+  audio_augment_variants: 2
+
+train:
+  target_frames: 16
+  embedding_dim: 96
+  neg_pos_ratio: 8
+  positive_target: 4000
+  augment_noise: 0.0
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  val_split: 0.2
+  seed: 42
+
+service:
+  host: "127.0.0.1"
+  port: 8766
+  ws_path: "/v1/wake/ws"
+  model_name: "xiaoyuan"
+  audio_device:
+  audio_queue_size: 50
+  threshold: 0.5
+  cooldown_seconds: 2.0
+  start_listening: false
+  audio_transition_timeout_sec: 5.0
+  vad_backend: "auto"
+  vad_aggressiveness: 2
+  vad_silero_threshold: 0.5
+  energy_threshold: 0.012

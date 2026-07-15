@@ -34,6 +34,9 @@ class WakeWordService:
         self._detector: WakeWordDetector | None = None
         self._worker: threading.Thread | None = None
         self._ready = threading.Event()
+        self._audio_open = threading.Event()
+        self._audio_closed = threading.Event()
+        self._audio_closed.set()
         self._error: str | None = None
         self._worker_state = "starting"
         self._audio_restart_count = 0
@@ -44,13 +47,24 @@ class WakeWordService:
             self._listen_flag.set()
 
     def status(self) -> dict:
+        worker_alive = self._worker.is_alive() if self._worker is not None else False
+        model_loaded = self._detector is not None and self._ready.is_set()
+        ready = (
+            model_loaded
+            and worker_alive
+            and self._worker_state not in {"failed", "stopped", "retrying_audio"}
+            and (not self._listen_flag.is_set() or self._audio_open.is_set())
+        )
         return {
             "type": p.TYPE_STATUS,
             "listening": self._listen_flag.is_set(),
             "model": self.cfg.service.model_name,
             "threshold": self.cfg.service.threshold,
-            "ready": self._ready.is_set(),
-            "worker_alive": self._worker.is_alive() if self._worker is not None else False,
+            "ready": ready,
+            "state": self._worker_state,
+            "model_loaded": model_loaded,
+            "audio_open": self._audio_open.is_set(),
+            "worker_alive": worker_alive,
             "error": self._error,
             "uptime_seconds": round(time.monotonic() - self._started_at, 3),
             "worker_state": self._worker_state,
@@ -77,6 +91,58 @@ class WakeWordService:
             self._listen_flag.clear()
             logger.info("wake listening stopped")
         self._schedule_broadcast(self.status())
+
+    async def _start_and_wait(self) -> dict:
+        changed = not self._listen_flag.is_set()
+        error = self.start_listening()
+        if error is not None:
+            error.setdefault("code", "MODEL_NOT_READY")
+            error["ok"] = False
+            return error
+        if self._audio_open.is_set():
+            return self._ack("start", changed=changed)
+        opened = await asyncio.to_thread(
+            self._audio_open.wait,
+            self.cfg.service.audio_transition_timeout_sec,
+        )
+        if not opened:
+            return self._transition_error("start", "AUDIO_OPEN_TIMEOUT", self._error or "audio input did not open")
+        return self._ack("start", changed=changed)
+
+    async def _stop_and_wait(self) -> dict:
+        changed = self._listen_flag.is_set() or self._audio_open.is_set()
+        self.stop_listening()
+        if self._audio_closed.is_set():
+            return self._ack("stop", changed=changed)
+        closed = await asyncio.to_thread(
+            self._audio_closed.wait,
+            self.cfg.service.audio_transition_timeout_sec,
+        )
+        if not closed:
+            return self._transition_error("stop", "AUDIO_CLOSE_TIMEOUT", "audio input did not close")
+        return self._ack("stop", changed=changed)
+
+    def _ack(self, cmd: str, *, changed: bool) -> dict:
+        status = self.status()
+        return {
+            "type": p.TYPE_ACK,
+            "cmd": cmd,
+            "ok": True,
+            "changed": changed,
+            "state": status["state"],
+            "audio_open": status["audio_open"],
+        }
+
+    def _transition_error(self, cmd: str, code: str, message: str) -> dict:
+        return {
+            "type": p.TYPE_ERROR,
+            "cmd": cmd,
+            "ok": False,
+            "code": code,
+            "message": message,
+            "state": self._worker_state,
+            "audio_open": self._audio_open.is_set(),
+        }
 
     def shutdown(self) -> None:
         logger.info("wake service shutdown requested")
@@ -122,15 +188,13 @@ class WakeWordService:
     async def _dispatch(self, websocket, payload: dict) -> None:
         cmd = str(payload.get("type") or payload.get("cmd") or "")
         if cmd == p.CMD_START:
-            error = self.start_listening()
-            await self._send_json(websocket, error or {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+            await self._send_json(websocket, await self._start_and_wait())
         elif cmd == p.CMD_STOP:
-            self.stop_listening()
-            await self._send_json(websocket, {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
+            await self._send_json(websocket, await self._stop_and_wait())
         elif cmd == p.CMD_STATUS:
             await self._send_json(websocket, self.status())
         elif cmd == p.CMD_PING:
-            await self._send_json(websocket, {"type": p.TYPE_PONG})
+            await self._send_json(websocket, {"type": p.TYPE_PONG, **{k: self.status()[k] for k in ("ready", "state", "model_loaded", "audio_open", "last_error")}})
         elif cmd == p.CMD_SHUTDOWN:
             await self._send_json(websocket, {"type": p.TYPE_ACK, "cmd": cmd, "ok": True})
             self.shutdown()
@@ -194,7 +258,9 @@ class WakeWordService:
 
             try:
                 self._worker_state = "opening_audio"
+                self._audio_closed.clear()
                 with AudioInput(self.cfg) as audio:
+                    self._audio_open.set()
                     retry_seconds = 1.0
                     self._error = None
                     self._detector.reset()
@@ -225,6 +291,12 @@ class WakeWordService:
                 if self._shutdown_flag.wait(retry_seconds):
                     break
                 retry_seconds = min(retry_seconds * 2.0, 10.0)
+            finally:
+                self._audio_open.clear()
+                if not self._listen_flag.is_set() and not self._shutdown_flag.is_set():
+                    self._worker_state = "idle"
+                self._audio_closed.set()
+                self._schedule_broadcast(self.status())
 
         self._worker_state = "stopped"
         logger.info("wake detector worker stopped")

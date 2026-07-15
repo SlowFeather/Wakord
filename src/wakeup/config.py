@@ -88,6 +88,7 @@ class ServiceConfig:
     threshold: float = 0.5
     cooldown_seconds: float = 2.0
     start_listening: bool = False
+    audio_transition_timeout_sec: float = 5.0
     vad_backend: str = "auto"  # auto | silero | webrtc | energy | none
     vad_aggressiveness: int = 2  # webrtc 0~3
     vad_silero_threshold: float = 0.5  # silero 人声概率阈值 0~1
@@ -266,6 +267,7 @@ def validate_config(cfg: Config) -> None:
     _require_positive("service.sample_rate", cfg.service.sample_rate)
     _require_positive("service.frame_samples", cfg.service.frame_samples)
     _require_positive("service.audio_queue_size", cfg.service.audio_queue_size)
+    _require_positive("service.audio_transition_timeout_sec", cfg.service.audio_transition_timeout_sec)
     _require_range("service.threshold", cfg.service.threshold, 0.0, 1.0)
     _require_positive("service.cooldown_seconds", cfg.service.cooldown_seconds)
     if cfg.service.vad_backend not in {"auto", "silero", "webrtc", "energy", "none"}:
