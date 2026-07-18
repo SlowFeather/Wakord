@@ -37,6 +37,7 @@ TYPE_STATUS = "status"
 TYPE_WAKE = "wake"
 TYPE_ERROR = "error"
 TYPE_PONG = "pong"
+TYPE_AUDIO_OPEN = "audio_open"
 
 
 def encode(message: dict) -> bytes:

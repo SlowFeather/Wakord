@@ -83,6 +83,7 @@ class ServiceConfig:
     model_name: str = "xiaoyuan"
     sample_rate: int = 16000
     frame_samples: int = 1280  # openWakeWord 单帧 80ms @ 16k
+    input_mode: str = "microphone"  # microphone | external_pcm
     audio_device: int | str | None = None
     audio_queue_size: int = 50
     threshold: float = 0.5
@@ -267,6 +268,8 @@ def validate_config(cfg: Config) -> None:
     _require_positive("service.sample_rate", cfg.service.sample_rate)
     _require_positive("service.frame_samples", cfg.service.frame_samples)
     _require_positive("service.audio_queue_size", cfg.service.audio_queue_size)
+    if cfg.service.input_mode not in {"microphone", "external_pcm"}:
+        raise ValueError("service.input_mode must be one of: microphone, external_pcm")
     _require_positive("service.audio_transition_timeout_sec", cfg.service.audio_transition_timeout_sec)
     _require_range("service.threshold", cfg.service.threshold, 0.0, 1.0)
     _require_positive("service.cooldown_seconds", cfg.service.cooldown_seconds)

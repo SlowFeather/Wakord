@@ -85,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(sp)
     _add_client_opts(sp)
     _add_audio_device_opt(sp)
+    sp.add_argument("--input-mode", choices=["microphone", "external_pcm"], default=None)
     sp.add_argument("--listen", action="store_true", help="启动后立即开始监听")
 
     # ctl
@@ -235,6 +236,8 @@ def cmd_serve(args) -> int:
     cfg = load_config(args.config)
     cfg = _client_cfg(cfg, args)
     cfg = _audio_cfg(cfg, args)
+    if args.input_mode is not None:
+        cfg.service.input_mode = args.input_mode
     if args.listen:
         cfg.service.start_listening = True
     # 常驻服务写滚动文件日志（可用 WAKEUP_LOG_FILE 覆盖路径，设为空串禁用）

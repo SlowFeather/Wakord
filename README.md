@@ -290,6 +290,18 @@ pip install pytest
 pytest                       # 跑轻量单元测试（不需要音频/模型）
 ```
 
+## 外部 PCM 模式
+
+ChatCaht 托管部署使用 `service.input_mode: external_pcm`。连接 WebSocket 后先发送：
+
+```json
+{"type":"audio_open","sample_rate":16000,"channels":1,"frame_ms":10}
+```
+
+收到 `audio_open` ACK 后持续发送 little-endian int16 单声道 PCM 二进制帧。该模式不会打开本地声卡；`start`/`stop` 仅切换 armed 状态，检测器在 disarmed 时仍处理 PCM 以保持 openWakeWord 预热。重新 armed 后必须先看到一次分数下穿阈值，之后的上穿才能产生新 wake 事件，避免旧窗口误触发。
+
+独立运行继续使用 `service.input_mode: microphone`。外部模式尚未完成 `audio_open` 时，`start` 会返回 `AUDIO_STREAM_NOT_OPEN`，不会回退到本地麦克风。
+
 ### 本地验证（Windows / Anaconda）
 
 如果当前 Anaconda 版本不支持 `conda run`，可以先执行 `conda activate wakeup`，或直接调用环境里的 Python：

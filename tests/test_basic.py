@@ -434,6 +434,82 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def test_external_pcm_stays_warm_and_requires_low_before_rearm(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import threading
+    import time
+
+    import websockets
+
+    from wakeup.service.detector import DetectionEvent
+    from wakeup.service.server import WakeWordService
+
+    cfg = load_config()
+    cfg.paths.base_dir = str(tmp_path / "artifacts")
+    cfg.paths.model_path = str(tmp_path / "models" / "xiaoyuan.onnx")
+    cfg.service.port = _free_port()
+    cfg.service.input_mode = "external_pcm"
+    cfg.service.start_listening = False
+
+    class FakeDetector:
+        instances = []
+
+        def __init__(self, _cfg):
+            self.last_active_score = 0.0
+            self.frames = 0
+            type(self).instances.append(self)
+
+        def process(self, frame):
+            self.frames += 1
+            self.last_active_score = 0.9 if np.abs(frame).mean() > 100 else 0.1
+            if self.last_active_score >= cfg.service.threshold:
+                return DetectionEvent("xiaoyuan", self.last_active_score, time.time())
+            return None
+
+    monkeypatch.setattr("wakeup.service.server.WakeWordDetector", FakeDetector)
+    service = WakeWordService(cfg)
+    thread = threading.Thread(target=service.serve_forever, daemon=True)
+    thread.start()
+    assert service._ready.wait(timeout=3.0)
+
+    async def recv_type(ws, expected):
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+            if msg.get("type") == expected:
+                return msg
+
+    async def scenario():
+        url = f"ws://{cfg.service.host}:{cfg.service.port}{cfg.service.ws_path}"
+        async with websockets.connect(url, max_size=None) as ws:
+            await recv_type(ws, "status")
+            await ws.send(json.dumps({"type": "audio_open", "sample_rate": 16000, "channels": 1, "frame_ms": 10}))
+            assert (await recv_type(ws, "ack"))["cmd"] == "audio_open"
+
+            high = (np.ones(cfg.service.frame_samples, dtype=np.int16) * 1000).tobytes()
+            low = np.zeros(cfg.service.frame_samples, dtype=np.int16).tobytes()
+            await ws.send(high)
+            await asyncio.sleep(0.05)
+            assert FakeDetector.instances[0].frames == 1
+            assert service.status()["listening"] is False
+
+            await ws.send(json.dumps({"type": "start"}))
+            assert (await recv_type(ws, "ack"))["cmd"] == "start"
+            await ws.send(high)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(recv_type(ws, "wake"), timeout=0.1)
+            await ws.send(low)
+            await ws.send(high)
+            wake = await recv_type(ws, "wake")
+            assert wake["source"] == "external_pcm"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        service.shutdown()
+        thread.join(timeout=3.0)
+
+
 def test_service_retries_audio_after_start_failure(tmp_path, monkeypatch):
     import asyncio
     import json

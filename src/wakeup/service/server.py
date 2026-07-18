@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -32,6 +33,7 @@ class WakeWordService:
         self._listen_flag = threading.Event()
         self._shutdown_flag = threading.Event()
         self._detector: WakeWordDetector | None = None
+        self._detector_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._ready = threading.Event()
         self._audio_open = threading.Event()
@@ -42,6 +44,8 @@ class WakeWordService:
         self._audio_restart_count = 0
         self._last_score = 0.0
         self._last_wake_ts: float | None = None
+        self._external_clients: set[Any] = set()
+        self._armed_needs_low = False
 
         if cfg.service.start_listening:
             self._listen_flag.set()
@@ -49,11 +53,13 @@ class WakeWordService:
     def status(self) -> dict:
         worker_alive = self._worker.is_alive() if self._worker is not None else False
         model_loaded = self._detector is not None and self._ready.is_set()
+        external_mode = self.cfg.service.input_mode == "external_pcm"
+        audio_open = bool(self._external_clients) if external_mode else self._audio_open.is_set()
         ready = (
             model_loaded
             and worker_alive
             and self._worker_state not in {"failed", "stopped", "retrying_audio"}
-            and (not self._listen_flag.is_set() or self._audio_open.is_set())
+            and (external_mode or not self._listen_flag.is_set() or self._audio_open.is_set())
         )
         return {
             "type": p.TYPE_STATUS,
@@ -63,7 +69,9 @@ class WakeWordService:
             "ready": ready,
             "state": self._worker_state,
             "model_loaded": model_loaded,
-            "audio_open": self._audio_open.is_set(),
+            "audio_open": audio_open,
+            "input_mode": self.cfg.service.input_mode,
+            "external_streams": len(self._external_clients),
             "worker_alive": worker_alive,
             "error": self._error,
             "uptime_seconds": round(time.monotonic() - self._started_at, 3),
@@ -81,6 +89,9 @@ class WakeWordService:
             logger.warning("cannot start listening: %s", message)
             return {"type": p.TYPE_ERROR, "message": message}
         if not self._listen_flag.is_set():
+            detector = self._detector
+            score = float(getattr(detector, "last_active_score", 0.0)) if detector is not None else 0.0
+            self._armed_needs_low = score >= self.cfg.service.threshold
             self._listen_flag.set()
             logger.info("wake listening started")
         self._schedule_broadcast(self.status())
@@ -99,6 +110,11 @@ class WakeWordService:
             error.setdefault("code", "MODEL_NOT_READY")
             error["ok"] = False
             return error
+        if self.cfg.service.input_mode == "external_pcm":
+            if not self._external_clients:
+                self.stop_listening()
+                return self._transition_error("start", "AUDIO_STREAM_NOT_OPEN", "external PCM stream is not open")
+            return self._ack("start", changed=changed)
         if self._audio_open.is_set():
             return self._ack("start", changed=changed)
         opened = await asyncio.to_thread(
@@ -112,6 +128,8 @@ class WakeWordService:
     async def _stop_and_wait(self) -> dict:
         changed = self._listen_flag.is_set() or self._audio_open.is_set()
         self.stop_listening()
+        if self.cfg.service.input_mode == "external_pcm":
+            return self._ack("stop", changed=changed)
         if self._audio_closed.is_set():
             return self._ack("stop", changed=changed)
         closed = await asyncio.to_thread(
@@ -164,11 +182,28 @@ class WakeWordService:
         async with self._clients_lock:
             self._clients.add(websocket)
         logger.info("WebSocket connected client=%s", client)
+        external_buffer = bytearray()
         try:
             await self._send_json(websocket, self.status())
             async for message in websocket:
                 if isinstance(message, bytes):
-                    await self._send_json(websocket, {"type": p.TYPE_ERROR, "message": "binary input is not supported"})
+                    if self.cfg.service.input_mode != "external_pcm":
+                        await self._send_json(websocket, {"type": p.TYPE_ERROR, "message": "binary input requires external_pcm mode"})
+                        continue
+                    if websocket not in self._external_clients:
+                        await self._send_json(websocket, {"type": p.TYPE_ERROR, "code": "AUDIO_NOT_OPEN", "message": "send audio_open before PCM"})
+                        continue
+                    if len(message) % 2:
+                        await self._send_json(websocket, {"type": p.TYPE_ERROR, "code": "BAD_PCM", "message": "PCM byte length must be even"})
+                        continue
+                    external_buffer.extend(message)
+                    frame_bytes = self.cfg.service.frame_samples * 2
+                    while len(external_buffer) >= frame_bytes:
+                        raw_frame = bytes(external_buffer[:frame_bytes])
+                        del external_buffer[:frame_bytes]
+                        event = await asyncio.to_thread(self._process_external_frame, raw_frame)
+                        if event is not None:
+                            await self.broadcast(event)
                     continue
                 try:
                     payload = json.loads(message)
@@ -183,11 +218,26 @@ class WakeWordService:
             if self._clients_lock is not None:
                 async with self._clients_lock:
                     self._clients.discard(websocket)
+                    self._external_clients.discard(websocket)
             logger.info("WebSocket disconnected client=%s", client)
 
     async def _dispatch(self, websocket, payload: dict) -> None:
         cmd = str(payload.get("type") or payload.get("cmd") or "")
-        if cmd == p.CMD_START:
+        if cmd == p.TYPE_AUDIO_OPEN:
+            if self.cfg.service.input_mode != "external_pcm":
+                await self._send_json(websocket, self._transition_error(cmd, "WRONG_INPUT_MODE", "service is not in external_pcm mode"))
+                return
+            sample_rate = int(payload.get("sample_rate") or 0)
+            channels = int(payload.get("channels") or 0)
+            if sample_rate != self.cfg.service.sample_rate or channels != 1:
+                await self._send_json(websocket, self._transition_error(cmd, "UNSUPPORTED_AUDIO_FORMAT", f"expected {self.cfg.service.sample_rate} Hz mono PCM"))
+                return
+            if self._clients_lock is not None:
+                async with self._clients_lock:
+                    self._external_clients.add(websocket)
+            await self._send_json(websocket, self._ack(cmd, changed=True))
+            self._schedule_broadcast(self.status())
+        elif cmd == p.CMD_START:
             await self._send_json(websocket, await self._start_and_wait())
         elif cmd == p.CMD_STOP:
             await self._send_json(websocket, await self._stop_and_wait())
@@ -249,6 +299,15 @@ class WakeWordService:
             self._schedule_broadcast({"type": p.TYPE_ERROR, "message": self._error})
             return
 
+        if self.cfg.service.input_mode == "external_pcm":
+            self._worker_state = "external_ready"
+            self._schedule_broadcast(self.status())
+            self._shutdown_flag.wait()
+            self._worker_state = "stopped"
+            self._schedule_broadcast(self.status())
+            logger.info("wake detector external PCM worker stopped")
+            return
+
         retry_seconds = 1.0
         while not self._shutdown_flag.is_set():
             self._worker_state = "idle"
@@ -300,6 +359,28 @@ class WakeWordService:
 
         self._worker_state = "stopped"
         logger.info("wake detector worker stopped")
+
+    def _process_external_frame(self, raw_frame: bytes) -> dict | None:
+        detector = self._detector
+        if detector is None:
+            return None
+        frame = np.frombuffer(raw_frame, dtype=np.int16).copy()
+        with self._detector_lock:
+            event = detector.process(frame)
+            score = float(getattr(detector, "last_active_score", 0.0))
+        self._last_score = score
+        if self._armed_needs_low and score < self.cfg.service.threshold:
+            self._armed_needs_low = False
+        if event is None or not self._listen_flag.is_set() or self._armed_needs_low:
+            return None
+        self._last_wake_ts = event.ts
+        return {
+            "type": p.TYPE_WAKE,
+            "model": event.model,
+            "score": round(event.score, 4),
+            "ts": event.ts,
+            "source": "external_pcm",
+        }
 
     def _schedule_broadcast(self, message: dict) -> None:
         if self._loop is None or self._loop.is_closed():
