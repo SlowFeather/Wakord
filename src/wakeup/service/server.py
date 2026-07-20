@@ -61,13 +61,21 @@ class WakeWordService:
             and self._worker_state not in {"failed", "stopped", "retrying_audio"}
             and (external_mode or not self._listen_flag.is_set() or self._audio_open.is_set())
         )
+        if ready:
+            lifecycle_state = "READY"
+        elif self._worker_state == "starting":
+            lifecycle_state = "STARTING"
+        elif self._worker_state in {"failed", "stopped"}:
+            lifecycle_state = "FAILED"
+        else:
+            lifecycle_state = "DEGRADED"
         return {
             "type": p.TYPE_STATUS,
             "listening": self._listen_flag.is_set(),
             "model": self.cfg.service.model_name,
             "threshold": self.cfg.service.threshold,
             "ready": ready,
-            "state": self._worker_state,
+            "state": lifecycle_state,
             "model_loaded": model_loaded,
             "audio_open": audio_open,
             "input_mode": self.cfg.service.input_mode,

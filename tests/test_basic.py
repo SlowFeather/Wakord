@@ -1,4 +1,4 @@
-"""轻量单元测试（不依赖音频/模型，可在 CI 直接跑）。
+﻿"""轻量单元测试（不依赖音频/模型，可在 CI 直接跑）。
 
     pip install pytest && pytest
 """
@@ -219,6 +219,7 @@ def test_service_start_returns_error_when_not_ready():
     assert status["worker_alive"] is False
     assert "uptime_seconds" in status
     assert status["worker_state"] in {"starting", "failed"}
+    assert status["state"] == "STARTING"
     assert status["audio_restart_count"] == 0
     assert {"ready", "state", "model_loaded", "audio_open", "last_error"} <= status.keys()
 
@@ -331,7 +332,11 @@ def test_service_broadcasts_wake_with_fake_audio_and_detector(tmp_path, monkeypa
             msg = None
             deadline = asyncio.get_running_loop().time() + 3.0
             while asyncio.get_running_loop().time() < deadline:
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                remaining = deadline - asyncio.get_running_loop().time()
+                try:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=min(0.5, remaining)))
+                except TimeoutError:
+                    continue
                 if msg.get("type") == "wake":
                     break
             assert msg["type"] == "wake"
